@@ -62,3 +62,37 @@ app grabs them too. To fix in Stage 1/2: require a bound HID/USB driver.
   R3→`BTN_START`, touchpad click→`BTN_THUMBL`, d-pad→`ABS_HAT0X/Y`.
 - No `BTN_MODE` (PS) event was logged — to be rechecked.
 - The app also opened and grabbed `"Smart Remote RCU Input"` (event8); it produced no events.
+
+## Output reports over Bluetooth (Stage 7, 2026-11-16)
+
+webOS 6 does **not** use BlueZ for Bluetooth HID. `webos-bluetooth-service` embeds MTK's
+Bluedroid (`/usr/lib/libbluetooth.default.so`) and owns `/dev/uhid`. A `write()` to the
+DualSense hidraw node becomes `UHID_OUTPUT` → `btif_hh_setreport(OUTPUT)`:
+
+- Default: **SET_REPORT on the control channel** (`52 31 …`). The DualSense answers the
+  handshake with SUCCESS and then ignores the report, whatever the CRC seed (`A2`, `52`, none).
+  Unknown report IDs (`0x02`) get `ERR_INVALID_REPORT_ID`, so the pad does parse them.
+- LG special case: if the device's stored name starts with **"Xbox Wireless Controller"**,
+  the report goes out as **DATA on the interrupt channel** (`A2 31 …`, `BTA_HhSendData`).
+  That is the form the DualSense acts on (and how Linux/Windows send it).
+- Luna `com.webos.service.bluetooth2/hid/internal/sendData` (root) also uses the interrupt
+  channel, but with header `0xA3` (DATA/feature); the pad ignores that too.
+- Renaming the pad in `/mnt/lg/cmn_data/btsvc/bluedroid-mtk/rec/bluedroid/bt_config.conf`
+  does not stick: the name is refreshed from the device on every connection.
+- Two SET_REPORTs in flight at once (the second sent before the first's handshake) **stop
+  the pad's input reports until it is power-cycled**. Single writes survived 25/s.
+
+Fix: `tools/btfix` (run as root; the app uses the Homebrew Channel's `exec`) patches
+`btif_hh_setreport` in the running process via `/proc/<pid>/mem`:
+`strncmp(name, "Xbox Wireless Controller", 24)` → `strstr(name, "Wireless Controller")`
+(three halfwords at lib offsets `0x7fe96`, `0x7fe9e`, `0x7fea4`). It verifies a CRC32 of the
+whole 356-byte function first (build: webOS 6.5.3-47, firmware 03.53.45), writes in an order
+whose intermediate states all fall back to SET_REPORT, and reads back / rolls back. Nothing on
+disk changes; restarting the Bluetooth service or rebooting restores the original.
+`btfix --check` / `--undo` are available over SSH.
+
+Useful TV logs for this: `/var/log/bt_snoop_hci.cfa_MTK` (btsnoop, UTC timestamps, rotates at
+~2 MB) and `/var/log/bt_stack.log_MTK`. The hidraw `HID_UNIQ` address is byte-reversed.
+
+The pad's microphone and speaker are not usable over BT (proprietary audio-in-HID reports);
+see ROADMAP Stage 11 for the USB audio plan.

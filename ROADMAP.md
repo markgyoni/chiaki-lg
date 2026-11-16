@@ -187,7 +187,11 @@ Tasks:
 - [x] **Reset all outputs** (triggers off, motors off) on session end, disconnect and app exit. Otherwise the triggers stay stiff.
 - [x] Config toggles: `"trigger_effects": true`, `"rumble": true` (shared with Stage 3).
 
+- [x] **Bluetooth fix (v0.4.1):** webOS's Bluetooth stack (MTK Bluedroid inside `webos-bluetooth-service`) sends hidraw output reports as SET_REPORT on the HID control channel. The DualSense acknowledges those and ignores them; it only acts on DATA (`0xA2`) on the interrupt channel. LG sends DATA only for devices named "Xbox Wireless Controller" (`btif_hh_setreport`). `tools/btfix` patches that name check in the running service's memory to match any "Wireless Controller"; the app runs it as root through the Homebrew Channel when a BT DualSense connects (`src/bt_patch.c`, config `dualsense_bt_patch`). Unrooted TV or unknown firmware: BT outputs stay off; USB is unaffected. Details in `docs/controllers/dualsense-bt-webos6.md`.
+- [x] **Write spacing:** two output reports a few ms apart (the second sent before the first's handshake) wedged the pad's input until it was power-cycled. `DsOutput` now keeps ≥ 25 ms between reports on BT (8 ms on USB).
+
 **Done when:** in Astro's Playroom (free on PS5) the triggers resist, the pad rumbles, the lightbar follows the game, and everything resets after quitting. Works over USB and BT.
+**Status (2026-11-16, v0.4.1):** passed on the TV over USB and BT (BT with btfix applied automatically via the Homebrew Channel). Stage 8 (haptics → rumble) works on the DualSense too.
 
 ---
 
@@ -205,10 +209,7 @@ Tasks:
 
 ## Stage 9 (stretch): True HD haptics
 
-Hard and uncertain on a TV. Attempt it only after Stages 0–8 are solid.
-
-- **USB:** the DualSense is also a USB audio device. Haptics go to channels 3–4 of its 4-channel output. Requires `snd-usb-audio` on the TV kernel and ALSA access from the app. Check `/proc/asound/cards` with the pad plugged in.
-- **BT:** haptic audio is sent inside HID output reports. See chiaki-ng's implementation and SDL's PS5 driver.
+Merged into **Stage 11** (DualSense USB audio), which shares the same USB audio device with the microphone and headset output.
 
 ---
 
@@ -221,6 +222,25 @@ Hard and uncertain on a TV. Attempt it only after Stages 0–8 are solid.
 
 ---
 
+## Stage 11: DualSense USB audio (microphone, HD haptics, headset)
+
+**Why:** the rest of the DualSense is its audio side: the microphone for voice chat, the HD haptic motors (today they get plain rumble from Stage 8), and the speaker / headset jack. Over USB the pad is a standard USB audio device: a 4-channel output (1–2 speaker/headset, 3–4 haptic actuators) and a mono microphone input. The TV kernel has `snd-usb-audio` built in (`CONFIG_SND_USB_AUDIO=y`, checked 2026-11-16).
+
+**Bluetooth:** not planned. Over BT the pad carries audio in proprietary HID output reports. HD haptics over BT is possible in principle (it needs the btfix interrupt-channel path from Stage 7, at a much higher data rate) but is only partly reverse-engineered. There is no known open implementation of the BT microphone or speaker. Revisit only as an experiment once USB works.
+
+Tasks:
+- [ ] **Check first:** with the pad on USB, `/proc/asound/cards` lists it, and the app's user (uid 5131, group `audio`?) can open its `/dev/snd/pcmC*` devices. If the app can't, the options are elevated rights via the Homebrew Channel or dropping the stage.
+- [ ] Find the DualSense card (USB VID/PID `054c:0ce6` / `0df2`) and open it with ALSA (or SDL audio if SDL's ALSA backend sees it).
+- [ ] **Microphone:** capture 48 kHz mono in 480-sample (10 ms) frames, then send them to the PS5 with libchiaki: `chiaki_session_connect_microphone`, `ChiakiOpusEncoder` + `ChiakiAudioSender`. Follow chiaki-ng's `gui/src/streamsession.cpp`, which also uses speex echo cancellation.
+- [ ] **Mute button:** toggle the mic with `chiaki_session_toggle_microphone`, and drive the mute LED (output report byte 8 of the common block).
+- [ ] **HD haptics:** play the PS5 haptics stream (the Stage 8 PCM, upsampled to 48 kHz) on channels 3–4 instead of turning it into rumble. Keep Stage 8 rumble for BT and for other pads.
+- [ ] **Headset / speaker (optional):** play the game audio, or only voice chat, on channels 1–2. The game audio currently goes to the TV's hardware Opus decoder (NDL), so this route needs a software Opus decode (libopus). Remote Play sends no separate controller-speaker stream, so this is "TV audio on the controller", not the game's controller-speaker sounds.
+- [ ] Config toggles: `"dualsense_mic"`, `"dualsense_hd_haptics"`, `"dualsense_audio_out"` (`off` / `chat` / `all`).
+
+**Done when:** over USB, party chat on the PS5 hears you through the DualSense mic and the mute button works; Astro's Playroom has fine-grained haptics instead of rumble; and with the option on, audio plays in a headset plugged into the controller.
+
+---
+
 ## Assumptions to verify early
 
 | Assumption | Verified in | If false |
@@ -229,3 +249,5 @@ Hard and uncertain on a TV. Attempt it only after Stages 0–8 are solid.
 | App can open `/dev/hidraw*` read/write | Stage 0 | Stages 4–8 for DualSense are blocked; look at running with elevated rights via Homebrew Channel, or settle for evdev-only |
 | BT DualSense switches to full reports after feature report 0x05 | Stage 4 | Follow SDL's enhanced-mode sequence |
 | Xbox BT pad advertises `EV_FF` on webOS | Stage 3 | Xbox rumble needs raw HID too |
+| BT DualSense accepts output reports written to hidraw | Stage 7 | **False on webOS 6** (SET_REPORT is ignored): fixed with `tools/btfix` |
+| App's user can open the DualSense USB sound card | Stage 11 | Elevated rights via the Homebrew Channel, or no USB audio features |

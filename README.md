@@ -135,6 +135,7 @@ Most settings are managed through the in-app Settings screen. You can also edit 
 | `dualsense_hid` | bool | `true` | Read a DualSense through its raw HID reports instead of the TV's generic driver. Needed for the touchpad (and later motion, rumble, adaptive triggers). Set `false` to fall back to plain buttons/sticks. |
 | `motion` | bool | `true` | Send DualSense gyro/accelerometer to the PS5 (motion aiming). Needs `dualsense_hid`. |
 | `trigger_effects` | bool | `true` | DualSense adaptive triggers. Needs `dualsense_hid`. |
+| `dualsense_bt_patch` | bool | `true` | Make DualSense rumble, adaptive triggers and lightbar work over **Bluetooth**. LG's Bluetooth stack sends controller output in a form the DualSense ignores (it only does it right for Xbox pads). On a **rooted** TV the app runs the bundled `btfix` helper through the Homebrew Channel, which fixes this in the running Bluetooth service's memory: nothing on disk changes, and a reboot undoes it. It only patches a known firmware build (webOS 6.5.3 / 03.53.45 so far) and refuses anything else. Without root, or with `false`, DualSense outputs work over USB only. The log shows `[BTFIX]`. |
 | `input_debug` | bool | `false` | Log every raw gamepad event (`[PADEV]`) and sample raw HID reports at startup. Controller capabilities (`[PAD]`/`[HID]`) are always logged. |
 
 ### PSN cloud wakeup (optional)
