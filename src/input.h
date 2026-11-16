@@ -10,6 +10,7 @@ typedef struct {
     bool        debug;             // config "input_debug": log raw events, sample hidraw
     const char *profile_override;  // config "controller_profile": "auto" or a pad_profile id
     bool        rumble;            // config "rumble"
+    bool        dualsense_hid;     // config "dualsense_hid": raw HID backend for DualSense
 } InputOptions;
 
 InputContext *input_init(const InputOptions *opt);

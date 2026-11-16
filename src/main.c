@@ -1265,6 +1265,7 @@ int main(int argc, char *argv[])
         .debug = cfg.input_debug,
         .profile_override = cfg.controller_profile,
         .rumble = cfg.rumble,
+        .dualsense_hid = cfg.dualsense_hid,
     };
     InputContext *input_ctx = input_init(&input_opt);
     g_input_ctx = input_ctx;

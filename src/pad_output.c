@@ -30,7 +30,7 @@ const char *pad_output_kind_name(PadOutputKind k)
 }
 
 /* /dev/hidrawN belonging to the same HID device as /dev/input/eventM. */
-static int open_sibling_hidraw(const char *event_path)
+int pad_output_open_sibling_hidraw(const char *event_path)
 {
     const char *base = strrchr(event_path, '/');
     base = base ? base + 1 : event_path;
@@ -80,7 +80,7 @@ void pad_output_open(PadOutput *o, const char *event_path, int evdev_fd,
 
     /* 2. Raw HID for pads on hid-generic. */
     if (vendor == 0x045e && bustype == BUS_BLUETOOTH) {
-        o->hidraw_fd = open_sibling_hidraw(event_path);
+        o->hidraw_fd = pad_output_open_sibling_hidraw(event_path);
         if (o->hidraw_fd >= 0) {
             o->kind = PAD_OUT_XBOX_BT_HID;
             return;

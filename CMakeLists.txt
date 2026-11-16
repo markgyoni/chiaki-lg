@@ -135,6 +135,7 @@ add_executable(chiaki-webos
     src/pad_diag.c
     src/pad_profile.c
     src/pad_output.c
+    src/dualsense.c
 )
 
 # ── Version ───────────────────────────────────────────────────────────────────

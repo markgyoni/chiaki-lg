@@ -3,6 +3,7 @@
 #include "pad_diag.h"
 #include "pad_profile.h"
 #include "pad_output.h"
+#include "dualsense.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,6 +20,11 @@
 #include <sys/select.h>
 #include <time.h>
 #include <linux/input.h>
+#include <linux/hidraw.h>
+
+#ifndef HIDIOCGFEATURE
+#define HIDIOCGFEATURE(len) _IOC(_IOC_WRITE | _IOC_READ, 'H', 0x07, len)
+#endif
 
 // ── Fallback defines for old kernel headers (pre-3.16 webOS sysroot) ──────────
 // These gamepad layout aliases were added in Linux 3.16.
@@ -85,6 +91,17 @@ typedef struct {
     PadOutput  out;             // rumble transport for this pad
     bool dirty;                 // state changed since the last SYN_REPORT
     bool dropped;               // SYN_DROPPED seen: ignore events until next SYN_REPORT, then resync
+
+    // DualSense raw HID backend (Stage 4).  When hid_fd >= 0 the pad's state
+    // comes from hidraw reports; the evdev node stays open and grabbed only so
+    // webOS does not see the buttons, and its events are ignored.
+    int          hid_fd;
+    unsigned long hid_reports;
+    bool         hid_full_seen;
+    DsInputState ds_last;
+    int8_t       touch_cid[2];  // chiaki touch id per DualSense touch slot, -1 = up
+    uint8_t      touch_did[2];  // DualSense contact id for that slot
+    struct timespec ds_log_ts;
 } GamepadDev;
 
 struct InputContext {
@@ -100,6 +117,7 @@ struct InputContext {
     bool          debug;
     char          profile_override[32];
     bool          rumble_enabled;
+    bool          dualsense_hid;                // use the DualSense raw HID backend
     uint8_t       rumble_strong, rumble_weak;   // latest PS5 rumble request
 
     // Haptics → rumble (PS5 DualSense mode).  One strength value per haptics
@@ -441,8 +459,27 @@ static void try_open_pad_locked(InputContext *ctx, const char *path)
     snprintf(pad->path, sizeof(pad->path), "%s", path);
     snprintf(pad->name, sizeof(pad->name), "%s", devname);
     pad->fd = fd;
+    pad->hid_fd = -1;
+    pad->touch_cid[0] = pad->touch_cid[1] = -1;
     resync_pad_locked(pad);
     pad_output_open(&pad->out, path, fd, id.vendor, id.bustype);
+
+    if (ctx->dualsense_hid && ds_is_dualsense(id.vendor, id.product)) {
+        pad->hid_fd = pad_output_open_sibling_hidraw(path);
+        if (pad->hid_fd >= 0) {
+            // Ask for the calibration feature report: on Bluetooth this also
+            // switches the pad from the 10-byte simple report to the full
+            // 0x31 report (touchpad + motion).  Through webOS's uhid the ioctl
+            // returns EIO but the switch still happens (Stage 0 finding).
+            uint8_t feat[64] = { 0x05 };
+            int r = ioctl(pad->hid_fd, HIDIOCGFEATURE(sizeof(feat)), feat);
+            app_log_always("[INPUT]   DualSense raw HID backend on (calibration request: %s)\n",
+                           r >= 0 ? "OK" : strerror(errno));
+        } else {
+            app_log_always("[INPUT]   DualSense raw HID unavailable (%s) — using evdev\n",
+                           strerror(errno));
+        }
+    }
 
     app_log_always("[INPUT] Opened gamepad: \"%s\" @ %s bus=0x%02x vid=%04x pid=%04x driver=%s "
                    "profile=%s (%s)%s\n",
@@ -461,6 +498,8 @@ static void close_pad_locked(InputContext *ctx, int i, const char *why)
     if (pad->fd < 0) return;
     app_log_always("[INPUT] Gamepad \"%s\" (%s) removed: %s\n", pad->name, pad->path, why);
     pad_output_close(&pad->out);
+    if (pad->hid_fd >= 0) close(pad->hid_fd);
+    pad->hid_fd = -1;
     ioctl(pad->fd, EVIOCGRAB, 0);
     close(pad->fd);
     pad->fd = -1;
@@ -563,12 +602,114 @@ static void handle_pad_events_locked(InputContext *ctx, int i)
                 }
             }
 
+            // Raw HID backend active and delivering: evdev only keeps the grab.
+            if (pad->hid_fd >= 0 && pad->hid_reports > 0)
+                continue;
+
             if (ev->type == EV_KEY)
                 pad->dirty |= apply_key_event(&pad->state, pad, ev->code, ev->value);
             else if (ev->type == EV_ABS)
                 pad->dirty |= apply_abs_event(&pad->state, pad, ev->code, ev->value);
         }
     }
+}
+
+// ── DualSense raw HID reports → pad state ─────────────────────────────────────
+static void ds_apply_touch_locked(GamepadDev *pad, const DsInputState *ds)
+{
+    for (int s = 0; s < 2; s++) {
+        const DsTouch *t = &ds->touch[s];
+        uint16_t x = t->x >= DS_TOUCHPAD_W ? DS_TOUCHPAD_W - 1 : t->x;
+        uint16_t y = t->y >= DS_TOUCHPAD_H - 1 ? DS_TOUCHPAD_H - 2 : t->y;   // chiaki-ng: 0..1079
+        bool was = pad->touch_cid[s] >= 0;
+
+        if (was && (!t->active || t->id != pad->touch_did[s])) {
+            chiaki_controller_state_stop_touch(&pad->state, (uint8_t)pad->touch_cid[s]);
+            pad->touch_cid[s] = -1;
+            was = false;
+        }
+        if (t->active) {
+            if (!was) {
+                pad->touch_cid[s] = chiaki_controller_state_start_touch(&pad->state, x, y);
+                pad->touch_did[s] = t->id;
+            } else {
+                chiaki_controller_state_set_touch_pos(&pad->state, (uint8_t)pad->touch_cid[s], x, y);
+            }
+        }
+    }
+}
+
+static void ds_apply_locked(InputContext *ctx, GamepadDev *pad, const DsInputState *ds)
+{
+    ChiakiControllerState *st = &pad->state;
+    st->buttons  = ds->buttons;
+    st->left_x   = normalize_axis(ds->lx, 0, 255);
+    st->left_y   = normalize_axis(ds->ly, 0, 255);
+    st->right_x  = normalize_axis(ds->rx, 0, 255);
+    st->right_y  = normalize_axis(ds->ry, 0, 255);
+    st->l2_state = ds->l2;
+    st->r2_state = ds->r2;
+    if (ds->full)
+        ds_apply_touch_locked(pad, ds);
+
+    if (ctx->debug) {
+        const DsInputState *o = &pad->ds_last;
+        bool changed = ds->buttons != o->buttons || ds->touch[0].active != o->touch[0].active ||
+                       ds->touch[1].active != o->touch[1].active || ds->mute != o->mute;
+        if (changed || ms_elapsed(&pad->ds_log_ts) >= 2000) {
+            get_monotonic(&pad->ds_log_ts);
+            app_log_always("[DS] %s btn=0x%05x L=%u,%u R=%u,%u L2=%u R2=%u "
+                           "t0=%s%u,%u t1=%s%u,%u gyro=%d,%d,%d accel=%d,%d,%d\n",
+                           ds->full ? "full" : "simple", ds->buttons,
+                           ds->lx, ds->ly, ds->rx, ds->ry, ds->l2, ds->r2,
+                           ds->touch[0].active ? "+" : "-", ds->touch[0].x, ds->touch[0].y,
+                           ds->touch[1].active ? "+" : "-", ds->touch[1].x, ds->touch[1].y,
+                           ds->gyro[0], ds->gyro[1], ds->gyro[2],
+                           ds->accel[0], ds->accel[1], ds->accel[2]);
+        }
+    }
+    pad->ds_last = *ds;
+}
+
+// Caller holds state_mutex.
+static void handle_hid_reports_locked(InputContext *ctx, int i)
+{
+    GamepadDev *pad = &ctx->pads[i];
+    uint8_t rep[128];
+    bool got = false;
+
+    for (;;) {
+        ssize_t n = read(pad->hid_fd, rep, sizeof(rep));
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EINTR) break;
+            // hidraw gone: the pad is disconnecting; evdev will report it too.
+            app_log_always("[INPUT] %s: raw HID read failed (%s) — back to evdev\n",
+                           pad->path, strerror(errno));
+            close(pad->hid_fd);
+            pad->hid_fd = -1;
+            resync_pad_locked(pad);
+            publish_locked(ctx, ctx->session, false);
+            return;
+        }
+        if (n == 0) break;
+
+        DsInputState ds;
+        if (!ds_parse_input(rep, (size_t)n, &ds))
+            continue;
+        if (pad->hid_reports == 0)
+            app_log_always("[INPUT] %s: first DualSense report (id=0x%02x len=%zd)\n",
+                           pad->path, rep[0], n);
+        if (ds.full && !pad->hid_full_seen) {
+            pad->hid_full_seen = true;
+            app_log_always("[INPUT] %s: DualSense full reports active (touchpad/motion)\n",
+                           pad->path);
+        }
+        pad->hid_reports++;
+        ds_apply_locked(ctx, pad, &ds);
+        got = true;
+    }
+    if (got)
+        publish_locked(ctx, ctx->session, false);
 }
 
 // ── Evdev reader thread ────────────────────────────────────────────────────────
@@ -586,6 +727,10 @@ static void *evdev_reader(void *arg)
             if (ctx->pads[i].fd >= 0) {
                 FD_SET(ctx->pads[i].fd, &rfds);
                 if (ctx->pads[i].fd > maxfd) maxfd = ctx->pads[i].fd;
+                if (ctx->pads[i].hid_fd >= 0) {
+                    FD_SET(ctx->pads[i].hid_fd, &rfds);
+                    if (ctx->pads[i].hid_fd > maxfd) maxfd = ctx->pads[i].hid_fd;
+                }
             }
         }
         pthread_mutex_unlock(&ctx->state_mutex);
@@ -624,6 +769,9 @@ static void *evdev_reader(void *arg)
         // ── Pad events ───────────────────────────────────────────────────────
         if (sel > 0) {
             for (int i = 0; i < MAX_GAMEPADS; i++) {
+                int hfd = ctx->pads[i].hid_fd;
+                if (ctx->pads[i].fd >= 0 && hfd >= 0 && FD_ISSET(hfd, &rfds))
+                    handle_hid_reports_locked(ctx, i);
                 int fd = ctx->pads[i].fd;
                 if (fd >= 0 && FD_ISSET(fd, &rfds))
                     handle_pad_events_locked(ctx, i);
@@ -710,6 +858,7 @@ InputContext *input_init(const InputOptions *opt)
     ctx->session = NULL;
     ctx->debug   = opt->debug;
     ctx->rumble_enabled = opt->rumble;
+    ctx->dualsense_hid  = opt->dualsense_hid;
     for (int i = 0; i < MAX_GAMEPADS; i++) ctx->pads[i].fd = -1;
     snprintf(ctx->profile_override, sizeof(ctx->profile_override), "%s",
              (opt->profile_override && opt->profile_override[0]) ? opt->profile_override : "auto");
@@ -813,6 +962,7 @@ void input_fini(InputContext *ctx)
     for (int i = 0; i < MAX_GAMEPADS; i++) {
         if (ctx->pads[i].fd >= 0) {
             pad_output_close(&ctx->pads[i].out);
+            if (ctx->pads[i].hid_fd >= 0) close(ctx->pads[i].hid_fd);
             ioctl(ctx->pads[i].fd, EVIOCGRAB, 0);
             close(ctx->pads[i].fd);
         }
