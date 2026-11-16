@@ -64,10 +64,13 @@ Or transfer via [WebOS Dev Manager](https://github.com/webosbrew/dev-manager-des
 
 ### Step 4 — Launch and connect
 
-1. Launch **Chiaki-lg** on the TV
-2. Enter the local IP address of your PS5 and click **Import Config**. The `.ini` file is renamed to `.imported` after a successful import so it won't be reprocessed
-3. Open **Settings** and change anything as needed
-4. Select **Connect** — streaming starts immediately
+1. Launch **Chiaki-lg** on the TV. The right side of the start screen tells you what is still missing and lists your connected controllers.
+2. Enter the local IP address of your PS5 and select **Import keys**. The `.ini` file is renamed to `.imported` after a successful import so it won't be reprocessed
+3. Open **Settings** and change anything as needed (video, connection, controllers); a help line explains the selected option
+4. Optional: open **Controller test** to check every button, the touchpad, motion, vibration, adaptive triggers and the lightbar
+5. Select **Connect** — streaming starts immediately
+
+The menus work with the TV remote or a gamepad (D-pad/left stick to move, Cross to select, Circle to go back).
 
 > The `.ini` file does not contain your PS5's IP address. You must enter it manually before importing.
 

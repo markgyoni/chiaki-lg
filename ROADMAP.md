@@ -215,8 +215,10 @@ Merged into **Stage 11** (DualSense USB audio), which shares the same USB audio 
 
 ## Stage 10: Settings UI, docs, release
 
-- [ ] Add a "Controller" section to the settings screen (`ui.c`): profile override, rumble, trigger effects, DualSense mode, input debug.
-- [ ] Optional: a gamepad-test screen in the launcher that shows live buttons, axes, touches and motion. It removes the need for a PS5 to verify mappings.
+- [x] Add a "Controller" section to the settings screen (`ui.c`): profile override, rumble, trigger effects, DualSense mode, input debug. **(v0.5.0)** Also motion and the Bluetooth fix; changes apply on leaving the screen via `input_reconfigure()`.
+- [x] Optional: a gamepad-test screen in the launcher that shows live buttons, axes, touches and motion. **(v0.5.0, `ui_padtest.c`)** Also runs output tests (vibration, adaptive triggers, lightbar, player LEDs).
+- [x] **UI refresh (v0.5.0):** TrueType text with LG's fonts (`ui_text.c`, SDL2_ttf loaded at runtime, bitmap fallback); TV-sized launcher with step help and a live controller list; two-column settings with per-row help; gamepads navigate the menus (input starts before the launcher).
+- [ ] Test the v0.5.0 UI on the TV: launcher, settings (each controller option), controller test (every button, touch, motion, each output test), navigation with remote and with a gamepad.
 - [ ] Update the README: supported-controller table, feature matrix (buttons / touch / motion / rumble / triggers / haptics per controller and connection type), troubleshooting with `[PAD]` log lines.
 - [ ] Bump the version in `packaging/appinfo.json` and tag a release.
 
