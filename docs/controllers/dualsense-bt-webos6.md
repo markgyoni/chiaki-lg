@@ -48,3 +48,17 @@ LG virtual devices `"Smart Remote RCU Input"` (event8) and `"LGE Network Input"`
 have no driver, advertise every key/axis with bogus ranges (min=32768 max=32767) and pass
 the current `is_gamepad()` filter (it only rejects names starting with `LGE`/`LG `), so the
 app grabs them too. To fix in Stage 1/2: require a bound HID/USB driver.
+
+## In-app session (input_debug), 2026-11-16
+
+- The app runs as `uid=5131 gid=5000 groups=15,19,29,44,505,509,511,777`. Group 505 is
+  `compositor`, which owns `/dev/input/event*` and `/dev/hidraw*`, so **the app can open
+  hidraw read/write** (`/dev/hidraw0 ... open(O_RDWR)=OK`).
+- A second hidraw node appears for the LG Magic Remote (`vid=000f pid=3412 "LGE MR21N"`);
+  filter by Sony VID/PID.
+- Raw key events matched the hid-generic table: Square→`BTN_SOUTH`, Cross→`BTN_EAST`,
+  Circle→`BTN_C`, Triangle→`BTN_NORTH`, L1→`BTN_WEST`, R1→`BTN_Z`, L2→`BTN_TL` (+`ABS_RX`),
+  R2→`BTN_TR` (+`ABS_RY`), Create→`BTN_TL2`, Options→`BTN_TR2`, L3→`BTN_SELECT`,
+  R3→`BTN_START`, touchpad click→`BTN_THUMBL`, d-pad→`ABS_HAT0X/Y`.
+- No `BTN_MODE` (PS) event was logged — to be rechecked.
+- The app also opened and grabbed `"Smart Remote RCU Input"` (event8); it produced no events.

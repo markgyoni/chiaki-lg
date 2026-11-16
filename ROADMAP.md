@@ -46,7 +46,7 @@ hid-generic exposes **no touchpad coordinates, no motion sensors and no force fe
   - Kernel driver: readlink `/sys/class/input/eventN/device/device/driver` → basename (`hid-generic`, `sony`, `playstation`, `microsoft`, `xpad`, …).
   - Supported `EV_KEY` codes, `EV_ABS` codes with min/max, and whether `EV_FF` is supported.
 - [x] Add a `"input_debug": true` config flag that logs every raw `EV_KEY`/`EV_ABS` event (`type code value`).
-- [~] **Check that hidraw is accessible** (works as root over SSH; in-app uid to be confirmed): list `/dev/hidraw*` and try `open(O_RDWR)` on each. Log `HIDIOCGRAWINFO` (bustype, vendor, product) and the result. Stages 4–8 depend on this.
+- [x] **Check that hidraw is accessible** (yes: the app runs as uid 5131 in group `compositor`, which owns the nodes): list `/dev/hidraw*` and try `open(O_RDWR)` on each. Log `HIDIOCGRAWINFO` (bustype, vendor, product) and the result. Stages 4–8 depend on this.
 - [~] Capture logs for every controller you own (DualSense BT done: `docs/controllers/dualsense-bt-webos6.md`) (DualSense USB + BT, DS4, Xbox BT, Xbox USB if available). Save them under `docs/controllers/` as reference.
 
 **Done when:** for each controller you have a log of its driver, IDs, codes and ranges, and you know whether hidraw opens.
