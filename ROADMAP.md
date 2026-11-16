@@ -121,7 +121,8 @@ every face button, L1/R1, analog L2/R2 (full 0–255 travel), L3/R3, Create/Shar
 - [x] Route `CHIAKI_EVENT_RUMBLE` from `session_event_cb`, which runs on a chiaki thread, to a new `input_set_rumble(ctx, left, right)`. Store the values and let the input thread apply them, with no blocking I/O in the callback.
 - [x] Stop rumble on session end and app exit.
 - [x] Add a `"rumble": true` config toggle.
-- [x] Xbox over Bluetooth on hid-generic: raw HID output report `0x03` on the sibling `/dev/hidrawN`, re-sent every second while active (the report has a 2.55 s duration). `src/pad_output.c`. - [ ] DualSense/DS4 on hid-generic: deferred to Stage 7 — any output report switches a BT Sony pad to full input reports, which hid-generic cannot map, so it needs the Stage 4 hidraw input backend first.
+- [x] Xbox over Bluetooth on hid-generic: raw HID output report `0x03` on the sibling `/dev/hidrawN`, re-sent every second while active (the report has a 2.55 s duration). `src/pad_output.c`.
+- [ ] DualSense/DS4 on hid-generic: deferred to Stage 7. Any output report switches a BT Sony pad to full input reports, which hid-generic cannot map, so it needs the Stage 4 hidraw input backend first. - [ ] DualSense/DS4 on hid-generic: deferred to Stage 7 — any output report switches a BT Sony pad to full input reports, which hid-generic cannot map, so it needs the Stage 4 hidraw input backend first.
 
 **Done when:** an Xbox pad (BT/USB) and a DS4 (if it uses the `sony` driver) vibrate in a game, and the vibration stops on disconnect.
 
