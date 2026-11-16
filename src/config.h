@@ -25,6 +25,7 @@ typedef struct {
     // Copy from: %APPDATA%\Roaming\Chiaki\Chiaki.conf  →  psn_refresh_token = v3.xxxxx
     char    *psn_refresh_token; // long-lived OAuth2 refresh token (optional)
     bool     input_debug;       // log every raw gamepad event + sample hidraw reports
+    bool     rumble;            // forward PS5 rumble to controllers
     char    *controller_profile; // "auto" or a pad_profile id (sony_generic, xbox_bt, ...)
 } AppConfig;
 

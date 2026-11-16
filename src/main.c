@@ -52,6 +52,7 @@ static volatile bool g_should_exit   = false;
 static volatile bool g_session_ended = false;
 static volatile ChiakiQuitReason g_quit_reason = CHIAKI_QUIT_REASON_NONE;
 static volatile bool g_ps5_sleeping  = false;  // PS5 initiated Rest Mode
+static InputContext *volatile g_input_ctx = NULL;  // for rumble from session_event_cb
 
 static ChiakiSession  g_session;
 static SDL_Window    *g_window   = NULL;
@@ -140,6 +141,8 @@ static void session_event_cb(ChiakiEvent *event, void *user)
             (const uint8_t *)"0000", 4);
         break;
     case CHIAKI_EVENT_RUMBLE:
+        // left = low-frequency (strong) motor, right = high-frequency (weak)
+        input_set_rumble(g_input_ctx, event->rumble.left, event->rumble.right);
         break;
     case CHIAKI_EVENT_QUIT:
         // Log the reason so we can diagnose what triggered the disconnect.
@@ -1237,7 +1240,13 @@ int main(int argc, char *argv[])
     }
     app_log("[APP] audio_init OK\n");
 
-    InputContext *input_ctx = input_init(cfg.input_debug, cfg.controller_profile);
+    InputOptions input_opt = {
+        .debug = cfg.input_debug,
+        .profile_override = cfg.controller_profile,
+        .rumble = cfg.rumble,
+    };
+    InputContext *input_ctx = input_init(&input_opt);
+    g_input_ctx = input_ctx;
 
     // ── Build connect info (done once, reused across reconnects) ──────────────
     ChiakiConnectInfo info;
@@ -1613,6 +1622,7 @@ int main(int argc, char *argv[])
     }
 
 cleanup_session_ctx:
+    g_input_ctx = NULL;
     input_fini(input_ctx);
     audio_fini(audio_ctx);
     video_fini(video_ctx);

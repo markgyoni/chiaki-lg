@@ -2,6 +2,7 @@
 #include "app_log.h"
 #include "pad_diag.h"
 #include "pad_profile.h"
+#include "pad_output.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -76,6 +77,7 @@ typedef struct {
     ChordState chord;
     PadProfile profile;         // evdev code → chiaki mapping for this device
     ChiakiControllerState state;  // this pad's contribution
+    PadOutput  out;             // rumble transport for this pad
     bool dirty;                 // state changed since the last SYN_REPORT
     bool dropped;               // SYN_DROPPED seen: ignore events until next SYN_REPORT, then resync
 } GamepadDev;
@@ -92,6 +94,8 @@ struct InputContext {
     volatile bool running;
     bool          debug;
     char          profile_override[32];
+    bool          rumble_enabled;
+    uint8_t       rumble_strong, rumble_weak;   // latest PS5 rumble request
 
     int             inotify_fd;          // -1 if unavailable
     bool            rescan_pending;
@@ -357,7 +361,9 @@ static void try_open_pad_locked(InputContext *ctx, const char *path)
         if (ctx->pads[i].fd < 0) { slot = i; break; }
     if (slot < 0) return;
 
-    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    // Read/write so force feedback can be written where the driver supports it.
+    int fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0) return;
 
     char devname[128] = {0};
@@ -421,12 +427,16 @@ static void try_open_pad_locked(InputContext *ctx, const char *path)
     snprintf(pad->name, sizeof(pad->name), "%s", devname);
     pad->fd = fd;
     resync_pad_locked(pad);
+    pad_output_open(&pad->out, path, fd, id.vendor, id.bustype);
 
     app_log_always("[INPUT] Opened gamepad: \"%s\" @ %s bus=0x%02x vid=%04x pid=%04x driver=%s "
                    "profile=%s (%s)%s\n",
                    devname, path, id.bustype, id.vendor, id.product, drv,
                    pad->profile.id, pad->profile.description,
                    pad->profile.chord_touchpad ? " touchpad=Select+Start chord" : "");
+    app_log_always("[INPUT]   rumble: %s%s%s%s\n", pad_output_kind_name(pad->out.kind),
+                   pad->out.why_none[0] ? " (" : "", pad->out.why_none,
+                   pad->out.why_none[0] ? ")" : "");
 }
 
 // Caller holds state_mutex.
@@ -435,6 +445,7 @@ static void close_pad_locked(InputContext *ctx, int i, const char *why)
     GamepadDev *pad = &ctx->pads[i];
     if (pad->fd < 0) return;
     app_log_always("[INPUT] Gamepad \"%s\" (%s) removed: %s\n", pad->name, pad->path, why);
+    pad_output_close(&pad->out);
     ioctl(pad->fd, EVIOCGRAB, 0);
     close(pad->fd);
     pad->fd = -1;
@@ -604,6 +615,18 @@ static void *evdev_reader(void *arg)
             }
         }
 
+        // ── Rumble (applied here so the chiaki callback never blocks on I/O) ─
+        {
+            struct timespec now;
+            get_monotonic(&now);
+            long now_ms = now.tv_sec * 1000L + now.tv_nsec / 1000000L;
+            uint8_t s = ctx->rumble_enabled ? ctx->rumble_strong : 0;
+            uint8_t w = ctx->rumble_enabled ? ctx->rumble_weak   : 0;
+            for (int i = 0; i < MAX_GAMEPADS; i++)
+                if (ctx->pads[i].fd >= 0)
+                    pad_output_rumble(&ctx->pads[i].out, s, w, now_ms);
+        }
+
         pthread_mutex_unlock(&ctx->state_mutex);
     }
 
@@ -634,7 +657,7 @@ static void log_controller_diagnostics(bool debug)
     closedir(dir);
 }
 
-InputContext *input_init(bool debug, const char *profile_override)
+InputContext *input_init(const InputOptions *opt)
 {
     InputContext *ctx = calloc(1, sizeof(*ctx));
     if (!ctx) return NULL;
@@ -643,14 +666,15 @@ InputContext *input_init(bool debug, const char *profile_override)
     pthread_mutex_init(&ctx->state_mutex, NULL);
     ctx->running = true;
     ctx->session = NULL;
-    ctx->debug   = debug;
+    ctx->debug   = opt->debug;
+    ctx->rumble_enabled = opt->rumble;
     for (int i = 0; i < MAX_GAMEPADS; i++) ctx->pads[i].fd = -1;
     snprintf(ctx->profile_override, sizeof(ctx->profile_override), "%s",
-             profile_override ? profile_override : "auto");
-    app_log_always("[INPUT] controller_profile=%s (choices: %s)\n",
-                   ctx->profile_override, pad_profile_ids());
+             (opt->profile_override && opt->profile_override[0]) ? opt->profile_override : "auto");
+    app_log_always("[INPUT] controller_profile=%s (choices: %s) rumble=%s\n",
+                   ctx->profile_override, pad_profile_ids(), opt->rumble ? "on" : "off");
 
-    log_controller_diagnostics(debug);
+    log_controller_diagnostics(opt->debug);
 
     ctx->inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
     if (ctx->inotify_fd >= 0 &&
@@ -682,6 +706,19 @@ void input_set_session(InputContext *ctx, ChiakiSession *session)
     // across a reconnect).
     if (session)
         publish_locked(ctx, session, true);
+    // No session → nothing may keep a motor running.
+    ctx->rumble_strong = ctx->rumble_weak = 0;
+    pthread_mutex_unlock(&ctx->state_mutex);
+}
+
+void input_set_rumble(InputContext *ctx, uint8_t strong, uint8_t weak)
+{
+    if (!ctx) return;
+    pthread_mutex_lock(&ctx->state_mutex);
+    if (ctx->debug && (strong != ctx->rumble_strong || weak != ctx->rumble_weak))
+        app_log_always("[RUMBLE] strong=%u weak=%u\n", strong, weak);
+    ctx->rumble_strong = strong;
+    ctx->rumble_weak   = weak;
     pthread_mutex_unlock(&ctx->state_mutex);
 }
 
@@ -692,6 +729,7 @@ void input_fini(InputContext *ctx)
     pthread_join(ctx->reader_thread, NULL);
     for (int i = 0; i < MAX_GAMEPADS; i++) {
         if (ctx->pads[i].fd >= 0) {
+            pad_output_close(&ctx->pads[i].out);
             ioctl(ctx->pads[i].fd, EVIOCGRAB, 0);
             close(ctx->pads[i].fd);
         }
