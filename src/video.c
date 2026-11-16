@@ -6,7 +6,7 @@
 #include <string.h>
 
 /* Forward declaration — defined in main.c */
-extern void app_log(const char *fmt, ...);
+#include "app_log.h"
 // Set to true once we've received the first video sample.
 extern volatile bool g_have_video_frame;
 
