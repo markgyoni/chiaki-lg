@@ -171,6 +171,19 @@ static void session_event_cb(ChiakiEvent *event, void *user)
     }
 }
 
+// SS4S / NDL internal logging → our log (info and above; NDL only logs
+// lifecycle events at info, nothing per frame).
+static void ss4s_log_cb(SS4S_LogLevel level, const char *tag, const char *fmt, ...)
+{
+    if (level > SS4S_LogLevelInfo) return;
+    char msg[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+    app_log_always("[SS4S/%s] %s\n", tag ? tag : "?", msg);
+}
+
 // PS5 haptics audio (DualSense mode) → controller rumble, see input.c.
 static void haptics_frame_cb(uint8_t *buf, size_t buf_size, void *user)
 {
@@ -1159,6 +1172,7 @@ int main(int argc, char *argv[])
     SS4S_Config ss4s_cfg = {
         .audioDriver = cfg.ss4s_module,
         .videoDriver = cfg.ss4s_module,
+        .loggingFunction = ss4s_log_cb,
     };
     SS4S_Init(argc, argv, &ss4s_cfg);
     SS4S_PostInit(argc, argv);

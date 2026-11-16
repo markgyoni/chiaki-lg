@@ -35,6 +35,9 @@ struct VideoContext {
     uint64_t     frame_count;
     unsigned     reported_samples;
     unsigned     reported_mask;   // bitmask of distinct reported codec values (only for known CHIAKI_CODEC_* values)
+    bool         hdr_pending;     // HDR10 info not yet accepted by NDL
+    unsigned     hdr_attempts;
+    uint64_t     fed_frames;      // total frames fed (never reset)
 };
 
 VideoContext *video_init(SS4S_Player *player, int width, int height, int fps, int chiaki_codec)
@@ -75,26 +78,39 @@ VideoContext *video_init(SS4S_Player *player, int width, int height, int fps, in
     // metadata over Remote Play, so use typical HDR10 values (as moonlight-tv
     // does when the host provides none).  Values follow the HEVC SEI units:
     // primaries/white point in 0.00002, max luminance in cd/m², min in 0.0001 cd/m².
-    if (chiaki_codec == CHIAKI_CODEC_H265_HDR) {
-        SS4S_VideoHDRInfo hdr = {
-            .displayPrimariesX = { .r = 35400, .g = 8500,  .b = 6550 },  // BT.2020
-            .displayPrimariesY = { .r = 14600, .g = 39850, .b = 2300 },
-            .whitePointX = 15635, .whitePointY = 16450,                  // D65
-            .maxDisplayMasteringLuminance = 1000,
-            .minDisplayMasteringLuminance = 50,
-            .maxContentLightLevel = 1000,
-            .maxPicAverageLightLevel = 400,
-            .transferCharacteristics = 16,   // SMPTE ST 2084 (PQ)
-            .colorPrimaries = 9,             // BT.2020
-            .matrixCoefficients = 9,         // BT.2020 non-constant
-            .videoFullRange = 0,
-        };
-        bool ok = SS4S_PlayerVideoSetHDRInfo(ctx->player, &hdr);
-        app_log_always("[VIDEO] HDR10 signalling to the TV: %s\n", ok ? "OK" : "FAILED");
-    }
+    //
+    // NDL only loads the media once both audio and video are opened (audio
+    // opens on the first audio packet), and NDL_DirectVideoSetHDRInfo fails
+    // before that — v0.2.1 called it here and got FAILED.  So retry from the
+    // sample callback until it is accepted.
+    ctx->hdr_pending = (chiaki_codec == CHIAKI_CODEC_H265_HDR);
 
     ctx->opened = true;
     return ctx;
+}
+
+static bool video_try_set_hdr(VideoContext *ctx)
+{
+    static const SS4S_VideoHDRInfo hdr = {
+        .displayPrimariesX = { .r = 35400, .g = 8500,  .b = 6550 },  // BT.2020
+        .displayPrimariesY = { .r = 14600, .g = 39850, .b = 2300 },
+        .whitePointX = 15635, .whitePointY = 16450,                  // D65
+        .maxDisplayMasteringLuminance = 1000,
+        .minDisplayMasteringLuminance = 50,
+        .maxContentLightLevel = 1000,
+        .maxPicAverageLightLevel = 400,
+        .transferCharacteristics = 16,   // SMPTE ST 2084 (PQ)
+        .colorPrimaries = 9,             // BT.2020
+        .matrixCoefficients = 9,         // BT.2020 non-constant
+        .videoFullRange = 0,
+    };
+    ctx->hdr_attempts++;
+    bool ok = SS4S_PlayerVideoSetHDRInfo(ctx->player, &hdr);
+    if (ok || ctx->hdr_attempts == 1 || ctx->hdr_attempts % 10 == 0)
+        app_log_always("[VIDEO] HDR10 signalling attempt %u (frame %llu): %s\n",
+                       ctx->hdr_attempts, (unsigned long long)ctx->fed_frames,
+                       ok ? "OK" : "failed, will retry");
+    return ok;
 }
 
 void video_fini(VideoContext *ctx)
@@ -186,6 +202,15 @@ bool video_sample_cb(uint8_t *buf, unsigned int buf_size, int codec, bool is_key
             app_log("[VIDEO/SS4S] PlayerVideoFeed FAILED rc=%d\n", rc);
         atomic_fetch_add_explicit(&g_stream_stats.video_feed_fail, 1, memory_order_relaxed);
         return false;
+    }
+
+    ctx->fed_frames++;
+
+    // HDR10 signalling once NDL has loaded the media (see video_init).
+    // Try every 30 frames (~0.5 s), give up after ~60 s.
+    if (ctx->hdr_pending && ctx->fed_frames % 30 == 1) {
+        if (video_try_set_hdr(ctx) || ctx->hdr_attempts >= 120)
+            ctx->hdr_pending = false;
     }
 
     // First successful feed → treat stream as "started" for UI purposes.
