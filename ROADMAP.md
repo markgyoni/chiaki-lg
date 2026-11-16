@@ -40,16 +40,18 @@ hid-generic exposes **no touchpad coordinates, no motion sensors and no force fe
 
 **Why:** You need a working build, and you need to see what each controller actually reports on *your* TV before changing any mappings.
 
-- [ ] Fork, set up the toolchain and build the unmodified tree with `./build-webos.sh`. Install it and confirm streaming works.
-- [ ] At startup, log a **capability dump** for every `/dev/input/event*` that passes `is_gamepad()`. Use `app_log_always`, tag `[PAD]`.
+- [x] Fork, set up the toolchain and build with `./build-webos.sh`. *(Built in WSL Debian with buildroot-nc4 `webos-a38c582`; streaming with the new build still to be confirmed on the TV.)*
+- [x] At startup, log a **capability dump** for every `/dev/input/event*` that passes `is_gamepad()`. Use `app_log_always`, tag `[PAD]`.
   - Name (`EVIOCGNAME`), bus/vendor/product/version (`EVIOCGID`).
   - Kernel driver: readlink `/sys/class/input/eventN/device/device/driver` → basename (`hid-generic`, `sony`, `playstation`, `microsoft`, `xpad`, …).
   - Supported `EV_KEY` codes, `EV_ABS` codes with min/max, and whether `EV_FF` is supported.
-- [ ] Add a `"input_debug": true` config flag that logs every raw `EV_KEY`/`EV_ABS` event (`type code value`).
-- [ ] **Check that hidraw is accessible**: list `/dev/hidraw*` and try `open(O_RDWR)` on each. Log `HIDIOCGRAWINFO` (bustype, vendor, product) and the result. Stages 4–8 depend on this.
-- [ ] Capture logs for every controller you own (DualSense USB + BT, DS4, Xbox BT, Xbox USB if available). Save them under `docs/controllers/` as reference.
+- [x] Add a `"input_debug": true` config flag that logs every raw `EV_KEY`/`EV_ABS` event (`type code value`).
+- [~] **Check that hidraw is accessible** (works as root over SSH; in-app uid to be confirmed): list `/dev/hidraw*` and try `open(O_RDWR)` on each. Log `HIDIOCGRAWINFO` (bustype, vendor, product) and the result. Stages 4–8 depend on this.
+- [~] Capture logs for every controller you own (DualSense BT done: `docs/controllers/dualsense-bt-webos6.md`) (DualSense USB + BT, DS4, Xbox BT, Xbox USB if available). Save them under `docs/controllers/` as reference.
 
 **Done when:** for each controller you have a log of its driver, IDs, codes and ranges, and you know whether hidraw opens.
+
+Tools added in this stage: `tools/paddiag` (SSH CLI: `info`, `events`, `hidraw`), `tools/deploy-tv.sh` (copy a build onto a rooted TV without touching `config.json`).
 
 ---
 
@@ -85,6 +87,7 @@ Choose the profile by (vendor, product, driver). If nothing matches, fall back t
 - [ ] Hat/d-pad: also handle the DualSense hat on `ABS_HAT0X/Y` (hid-generic converts the hat switch to two axes; verify this in the Stage 0 logs).
 - [ ] Add a `"controller_profile": "auto"` config override (`AppConfig`, `config.c`, `ui.c` settings, `packaging/config.json*`, README).
 - [ ] Fix the misleading comment at the top of `apply_abs_event` (GAS=R2, BRAKE=L2).
+- [ ] Tighten `is_gamepad()`: require a bound kernel driver. Stage 0 found that LG's virtual `"Smart Remote RCU Input"` and `"LGE Network Input"` nodes pass the current name filter and get grabbed.
 
 **Done when** each controller passes this test matrix in the PS5 *Settings → Accessibility → Controllers → Custom button assignments* preview, or on a gamepad-test screen:
 every face button, L1/R1, analog L2/R2 (full 0–255 travel), L3/R3, Create/Share, Options, PS, d-pad including diagonals, both sticks with no drift after trigger use, and touchpad click.
@@ -133,7 +136,7 @@ Reference implementations (read these, don't guess offsets):
 Tasks:
 - [ ] Find the matching hidraw node: `/sys/class/hidraw/hidrawN/device` and `/sys/class/input/eventM/device/device` resolve to the same HID device, or compare `HIDIOCGRAWINFO` vendor/product.
 - [ ] Detect USB or BT from `HIDIOCGRAWINFO.bustype`.
-- [ ] Read the calibration feature report `0x05` (`HIDIOCGFEATURE`). On BT this also switches the pad from the short `0x01` report to the full `0x31` report.
+- [ ] Read the calibration feature report `0x05` (`HIDIOCGFEATURE`). On BT this also switches the pad from the short `0x01` report to the full `0x31` report. **Stage 0 finding:** on webOS 6 (BlueZ → uhid) the ioctl returns `EIO` but the switch to `0x31` still happens, so the calibration data must be fetched another way (retry, or fall back to hid-playstation's default calibration).
 - [ ] Parse the input report: USB `0x01`, 64 bytes; BT `0x31`, 78 bytes, same payload shifted by 1. Fields: sticks, triggers, buttons + hat, gyro, accel, sensor timestamp, two touch points (active flag, id, 12-bit x/y).
 - [ ] Fill `ChiakiControllerState` buttons, sticks and triggers from the report, with the same semantics as Stage 1.
 - [ ] Fall back to the Stage 1 `sony_generic` evdev profile if hidraw can't be opened.

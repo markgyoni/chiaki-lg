@@ -22,6 +22,14 @@ Output: `build-webos/*.ipk`. Install with `ares-install --device myTV build-webo
 - New `.c` files must be added to `add_executable(chiaki-webos ...)` in `CMakeLists.txt`.
 - On WSL keep sources on the Linux filesystem (`~/`), not `/mnt/c/`.
 
+Host gotchas seen on Debian 13 WSL with buildroot-nc4 `webos-a38c582`: the SDK's bundled `cmake` needs `libssl.so.1.1` (replace `bin/cmake` with a pip-installed `cmake<4`; CMake 4 breaks old deps), chiaki-ng's `lib/protobuf` needs a host `protoc` at configure time, and `relocate-sdk.sh` needs the `file` command. Without `ares-package` on PATH the script stops after staging `build-webos/ipk-staging`.
+
+## Dev loop on a rooted TV
+
+- `tools/deploy-tv.sh <ssh-host> [staging-dir]` copies a build into the app dir over SSH (root), preserving `config.json` and credentials. Reinstalling an IPK replaces the app dir and loses them.
+- `paddiag` (built and shipped next to the binary) is the controller diagnostics CLI: `paddiag info`, `paddiag events [--grab]`, `paddiag hidraw /dev/hidrawN [--feature]`. Shared code lives in `src/pad_diag.c`; the app logs the same dump at startup (`[PAD]`/`[HID]`), and `"input_debug": true` adds raw `[PADEV]` event lines.
+- Controller findings per device go in `docs/controllers/`.
+
 ## Debugging on the TV
 
 Logs go to `/tmp/chiaki.log` on the TV (truncated each launch): `ares-shell --device myTV -- "tail -f /tmp/chiaki.log"`. Runtime config lives at `/media/developer/apps/usr/palm/applications/org.homebrew.chiaki/config.json`.

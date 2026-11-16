@@ -1237,7 +1237,7 @@ int main(int argc, char *argv[])
     }
     app_log("[APP] audio_init OK\n");
 
-    InputContext *input_ctx = input_init();
+    InputContext *input_ctx = input_init(cfg.input_debug);
 
     // ── Build connect info (done once, reused across reconnects) ──────────────
     ChiakiConnectInfo info;
