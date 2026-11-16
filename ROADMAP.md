@@ -106,7 +106,7 @@ every face button, L1/R1, analog L2/R2 (full 0–255 travel), L3/R3, Create/Shar
 - [x] ~~Release the grab between reconnect attempts~~ **Decided: keep the grab for the whole app lifetime.** Releasing it would hand the pad back to webOS during reconnect waits (B → Back would quit the app). The state is re-sent in full when a new session starts (`input_set_session`).
 - [x] Multi-controller policy: **merge** all pads into one player (unchanged behaviour); each pad keeps its own state, so releasing a button on one pad no longer cancels the other. Configurable selection is left for Stage 10.
 
-**Done when:** you can power a controller off and on mid-stream and it resumes, no button stays stuck after a disconnect, and two pads don't fight each other.
+**Done when:** you can power a controller off and on mid-stream and it resumes, no button stays stuck after a disconnect, and two pads don't fight each other.  **Status (2026-11-16):** passed on the TV — DualSense and Xbox reconnect mid-stream, no stuck input on disconnect, two pads together.
 
 ---
 
