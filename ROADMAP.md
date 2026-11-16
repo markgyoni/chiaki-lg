@@ -172,6 +172,7 @@ Tasks:
 - [x] Handle `CHIAKI_EVENT_MOTION_RESET` by resetting the tracker.
 
 **Done when:** gyro aiming works in a game with motion controls, without drift or inverted axes.
+**Status (2026-11-16, v0.3.1):** passed on the TV (DualSense BT, nominal scale + auto bias). Stages 4 and 5 passed too (touch latency follow-up open).
 
 ---
 
