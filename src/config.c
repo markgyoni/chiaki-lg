@@ -96,6 +96,11 @@ int config_load(AppConfig *cfg, const char *path)
     cfg->wakeup_delay_ms  = json_get_int(root,  "wakeup_delay_ms",  60000);
     cfg->sleep_on_exit    = json_get_bool(root, "sleep_on_exit",    true);
     cfg->input_debug      = json_get_bool(root, "input_debug",      false);
+    cfg->controller_profile = json_get_str(root, "controller_profile");
+    if (!cfg->controller_profile || !cfg->controller_profile[0]) {
+        free(cfg->controller_profile);
+        cfg->controller_profile = strdup("auto");
+    }
 
     // log_level: string or legacy bool
     {
@@ -165,5 +170,6 @@ void config_free(AppConfig *cfg)
     free(cfg->ss4s_module);
     free(cfg->video_codec);
     free(cfg->psn_refresh_token);
+    free(cfg->controller_profile);
     memset(cfg, 0, sizeof(*cfg));
 }
