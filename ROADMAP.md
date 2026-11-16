@@ -122,6 +122,7 @@ every face button, L1/R1, analog L2/R2 (full 0–255 travel), L3/R3, Create/Shar
 - [x] Stop rumble on session end and app exit.
 - [x] Add a `"rumble": true` config toggle.
 - [x] Xbox over Bluetooth on hid-generic: raw HID output report `0x03` on the sibling `/dev/hidrawN`, re-sent every second while active (the report has a 2.55 s duration). `src/pad_output.c`.
+- [x] **Fix after first TV test (v0.2.0):** no rumble at all — the PS5 sent zero rumble packets to a "DualShock 4" client. Now, like chiaki-ng, a PS5 session announces a DualSense (`enable_dualsense`) and the haptics audio stream is converted to motor rumble (pulled forward from Stages 7/8). Classic rumble events are still used when they arrive.
 - [ ] DualSense/DS4 on hid-generic: deferred to Stage 7. Any output report switches a BT Sony pad to full input reports, which hid-generic cannot map, so it needs the Stage 4 hidraw input backend first. - [ ] DualSense/DS4 on hid-generic: deferred to Stage 7 — any output report switches a BT Sony pad to full input reports, which hid-generic cannot map, so it needs the Stage 4 hidraw input backend first.
 
 **Done when:** an Xbox pad (BT/USB) and a DS4 (if it uses the `sony` driver) vibrate in a game, and the vibration stops on disconnect.
