@@ -138,6 +138,7 @@ add_executable(chiaki-webos
     src/dualsense.c
     src/bt_patch.c
     src/ui_text.c
+    src/ui_padtest.c
 )
 
 # ── Version ───────────────────────────────────────────────────────────────────

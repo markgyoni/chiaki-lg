@@ -12,6 +12,7 @@
 #include "config_import.h"
 #include "ui_text.h"
 #include "input.h"
+#include "ui_padtest.h"
 
 /* ── Gamepad → menu navigation ───────────────────────────────────────────────
  * Gamepads are read by input.c (grabbed, so webOS never sees them).  Turn
@@ -643,7 +644,11 @@ static void render_setup_screen(SDL_Renderer *r, const char *status,
         ry += btn_h + 16;
 
         /* Settings — full width */
-        draw_button(r, rx, ry, rw, 60, "Settings", focus == 16, true);
+        {
+            int half = (rw - 20) / 2;
+            draw_button(r, rx, ry, half, 60, "Settings", focus == 16, true);
+            draw_button(r, rx + half + 20, ry, half, 60, "Controller test", focus == 17, true);
+        }
         ry += 60 + 36;
 
         /* Contextual guidance */
@@ -1399,6 +1404,7 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
                     } else {
                         if (focus == 13 || focus == 14) focus = 0;
                         else if (focus == 16)            focus = 13;
+                        else if (focus == 17)            focus = 14;
                     }
                 } else if (sym == SDLK_DOWN) {
                     if (editing) {
@@ -1409,7 +1415,8 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
                         }
                     } else {
                         if (focus == 0)               focus = 13;
-                        else if (focus == 13 || focus == 14) focus = 16;
+                        else if (focus == 13)            focus = 16;
+                        else if (focus == 14)            focus = 17;
                     }
                 } else if (sym == SDLK_LEFT) {
                     if (editing) {
@@ -1419,6 +1426,7 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
                         }
                     } else {
                         if (focus == 14) focus = 13;
+                        else if (focus == 17) focus = 16;
                     }
                 } else if (sym == SDLK_RIGHT) {
                     if (editing) {
@@ -1428,6 +1436,7 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
                         }
                     } else {
                         if (focus == 13) focus = 14;
+                        else if (focus == 16) focus = 17;
                     }
                 }
 
@@ -1506,6 +1515,9 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
                             ui_reload_cfg(cfg, config_path);
                             break;
                         }
+                    } else if (!editing && focus == 17) {
+                        ui_run_padtest(renderer, input);
+                        msg[0] = '\0';
                     } else if (!editing && focus == 16) {
                         /* Settings — drains Back events internally before returning */
                         ui_run_settings(renderer, cfg, config_path, input);
