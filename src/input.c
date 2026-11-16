@@ -634,13 +634,22 @@ static void *evdev_reader(void *arg)
         {
             if (ms_elapsed(&ctx->haptic_tick) >= HAPTIC_TICK_MS) {
                 get_monotonic(&ctx->haptic_tick);
+                // Average everything that arrived since the last tick.  The PS5
+                // sends frames faster than 3 per 30 ms (~130/s measured), so
+                // draining a fixed 3 per tick (chiaki-ng's Qt timer scheme) let
+                // a backlog build up and made rumble outlast the effect by
+                // ~0.3 s.  Divide by at least HAPTIC_FRAMES_PER_TICK so a lone
+                // frame is not over-weighted.
                 uint32_t sum = 0;
-                for (int k = 0; k < HAPTIC_FRAMES_PER_TICK && ctx->haptic_count > 0; k++) {
+                int taken = 0;
+                while (ctx->haptic_count > 0) {
                     sum += ctx->haptic_queue[ctx->haptic_head];
                     ctx->haptic_head = (ctx->haptic_head + 1) % 32;
                     ctx->haptic_count--;
+                    taken++;
                 }
-                uint32_t strength = sum / HAPTIC_FRAMES_PER_TICK;   // 0..65535
+                uint32_t strength = sum / (uint32_t)(taken > HAPTIC_FRAMES_PER_TICK
+                                                     ? taken : HAPTIC_FRAMES_PER_TICK);
                 uint8_t level = (uint8_t)(strength >> 8);
                 if (strength > 0 && level == 0) level = 1;
                 if (ctx->debug && level != ctx->haptic_level)

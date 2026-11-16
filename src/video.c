@@ -69,6 +69,30 @@ VideoContext *video_init(SS4S_Player *player, int width, int height, int fps, in
     app_log("[VIDEO/SS4S] PlayerVideoOpen OK  codec=%s %dx%d@%dfps\n",
             ctx->use_h265 ? "H265" : "H264", width, height, fps);
 
+    // HDR: the PS5 sends HDR10 (PQ / BT.2020) when the session negotiated
+    // "dynamicRange":"HDR".  Without telling NDL, the TV stays in SDR mode and
+    // shows the PQ signal dim and flat.  The PS5 does not send its mastering
+    // metadata over Remote Play, so use typical HDR10 values (as moonlight-tv
+    // does when the host provides none).  Values follow the HEVC SEI units:
+    // primaries/white point in 0.00002, max luminance in cd/m², min in 0.0001 cd/m².
+    if (chiaki_codec == CHIAKI_CODEC_H265_HDR) {
+        SS4S_VideoHDRInfo hdr = {
+            .displayPrimariesX = { .r = 35400, .g = 8500,  .b = 6550 },  // BT.2020
+            .displayPrimariesY = { .r = 14600, .g = 39850, .b = 2300 },
+            .whitePointX = 15635, .whitePointY = 16450,                  // D65
+            .maxDisplayMasteringLuminance = 1000,
+            .minDisplayMasteringLuminance = 50,
+            .maxContentLightLevel = 1000,
+            .maxPicAverageLightLevel = 400,
+            .transferCharacteristics = 16,   // SMPTE ST 2084 (PQ)
+            .colorPrimaries = 9,             // BT.2020
+            .matrixCoefficients = 9,         // BT.2020 non-constant
+            .videoFullRange = 0,
+        };
+        bool ok = SS4S_PlayerVideoSetHDRInfo(ctx->player, &hdr);
+        app_log_always("[VIDEO] HDR10 signalling to the TV: %s\n", ok ? "OK" : "FAILED");
+    }
+
     ctx->opened = true;
     return ctx;
 }
