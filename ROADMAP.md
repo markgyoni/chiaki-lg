@@ -126,6 +126,7 @@ every face button, L1/R1, analog L2/R2 (full 0–255 travel), L3/R3, Create/Shar
 - [ ] DualSense/DS4 on hid-generic: deferred to Stage 7. Any output report switches a BT Sony pad to full input reports, which hid-generic cannot map, so it needs the Stage 4 hidraw input backend first. - [ ] DualSense/DS4 on hid-generic: deferred to Stage 7 — any output report switches a BT Sony pad to full input reports, which hid-generic cannot map, so it needs the Stage 4 hidraw input backend first.
 
 **Done when:** an Xbox pad (BT/USB) and a DS4 (if it uses the `sony` driver) vibrate in a game, and the vibration stops on disconnect.
+**Status (2026-11-16, v0.2.1):** passed on the TV with the Xbox Series pad over BT (haptics→rumble, stops with the effect). DualSense rumble follows in Stage 7.  **Side fix found while testing (v0.2.1–0.2.2):** HDR sessions looked dim because the app never told NDL the stream is HDR10. v0.2.2 sends HDR10 metadata via `SS4S_PlayerVideoSetHDRInfo`, retried until NDL has loaded the media.
 
 ---
 
