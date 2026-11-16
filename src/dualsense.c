@@ -1,6 +1,7 @@
 #include "dualsense.h"
 
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/types.h>
 
@@ -315,12 +316,42 @@ void ds_output_set_player(DsOutput *o, uint8_t player_index)
     o->player_dirty = true;
 }
 
+static long mono_ms(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec * 1000L + t.tv_nsec / 1000000L;
+}
+
+static long min_interval(const DsOutput *o)
+{
+    return o->bt ? DS_OUTPUT_MIN_INTERVAL_BT_MS : DS_OUTPUT_MIN_INTERVAL_USB_MS;
+}
+
+static bool pending(const DsOutput *o)
+{
+    return !o->setup_done || o->rumble_dirty || o->trig_dirty || o->intensity_dirty ||
+           o->led_dirty || o->player_dirty;
+}
+
+bool ds_output_flush_sync(DsOutput *o)
+{
+    if (!pending(o)) return true;
+    if (o->last_write_ms) {
+        long wait = o->last_write_ms + min_interval(o) - mono_ms();
+        if (wait > 0) usleep((useconds_t)wait * 1000);
+    }
+    return ds_output_flush(o);
+}
+
 bool ds_output_flush(DsOutput *o)
 {
     bool setup = !o->setup_done;
-    if (!setup && !o->rumble_dirty && !o->trig_dirty && !o->intensity_dirty &&
-        !o->led_dirty && !o->player_dirty)
+    if (!pending(o))
         return true;
+    long now = mono_ms();
+    if (o->last_write_ms && now - o->last_write_ms < min_interval(o))
+        return true;                          /* too soon: stays pending */
 
     uint8_t rep[78];
     memset(rep, 0, sizeof(rep));
@@ -379,6 +410,7 @@ bool ds_output_flush(DsOutput *o)
     }
 
     ssize_t w = write(o->fd, rep, size);
+    o->last_write_ms = now ? now : 1;         /* count failed attempts too */
     if (w != (ssize_t)size)
         return false;
     o->setup_done = true;

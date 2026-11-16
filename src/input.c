@@ -4,6 +4,7 @@
 #include "pad_profile.h"
 #include "pad_output.h"
 #include "dualsense.h"
+#include "bt_patch.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -105,6 +106,7 @@ typedef struct {
     DsMotion     motion;        // gyro/accel → chiaki motion + orientation (Stage 6)
     DsOutput     dsout;         // rumble/triggers/lightbar (Stage 7)
     bool         dsout_active;
+    bool         dsout_wait_patch;  // BT DualSense: outputs held until btfix is active
     bool         dsout_failed_logged;
 } GamepadDev;
 
@@ -138,6 +140,7 @@ struct InputContext {
     // DualSense outputs requested by the PS5 (Stage 7).  Kept here so a pad
     // that connects mid-session gets the current state.
     bool            trigger_effects_enabled;    // config "trigger_effects"
+    bool            bt_patch_enabled;           // config "dualsense_bt_patch"
     bool            trig_valid;
     uint8_t         trig_type_l, trig_type_r, trig_l[10], trig_r[10];
     bool            trig_intensity_off;         // PS5 setting: trigger effects off
@@ -400,6 +403,43 @@ static bool pad_path_open(InputContext *ctx, const char *path)
 }
 
 // ── Open, classify and exclusively grab one evdev node if it is a gamepad ─────
+// Start a DualSense's outputs from the session's current state.  Caller holds
+// state_mutex.
+static void activate_dsout_locked(InputContext *ctx, GamepadDev *pad)
+{
+    ds_output_set_lightbar(&pad->dsout, ctx->led[0], ctx->led[1], ctx->led[2]);
+    ds_output_set_player(&pad->dsout, ctx->player_index);
+    ds_output_set_intensity(&pad->dsout, ctx->ds_intensity);
+    if (ctx->trig_valid && ctx->trigger_effects_enabled && !ctx->trig_intensity_off)
+        ds_output_set_triggers(&pad->dsout, ctx->trig_type_l, ctx->trig_l,
+                               ctx->trig_type_r, ctx->trig_r);
+    pad->dsout_active = true;
+    pad->dsout_wait_patch = false;
+    app_log_always("[INPUT]   %s: DualSense outputs on: rumble, adaptive triggers%s, lightbar, player LEDs (%s)\n",
+                   pad->path, ctx->trigger_effects_enabled ? "" : " (disabled)",
+                   pad->dsout.bt ? "Bluetooth, via btfix" : "USB");
+}
+
+// Bluetooth DualSenses waiting for btfix: switch their outputs on once the
+// patch is active, or give up if it is unavailable.  Caller holds state_mutex.
+static void poll_bt_patch_locked(InputContext *ctx)
+{
+    BtPatchState st = bt_patch_state();
+    if (st != BT_PATCH_ACTIVE && st != BT_PATCH_UNAVAILABLE) return;
+    for (int i = 0; i < MAX_GAMEPADS; i++) {
+        GamepadDev *pad = &ctx->pads[i];
+        if (pad->fd < 0 || !pad->dsout_wait_patch) continue;
+        if (st == BT_PATCH_ACTIVE) {
+            activate_dsout_locked(ctx, pad);
+        } else {
+            pad->dsout_wait_patch = false;
+            app_log_always("[INPUT]   %s: DualSense outputs off over Bluetooth (%s); "
+                           "connect by USB for rumble/triggers/lightbar\n",
+                           pad->path, bt_patch_reason());
+        }
+    }
+}
+
 // Caller holds state_mutex.
 static void try_open_pad_locked(InputContext *ctx, const char *path)
 {
@@ -476,6 +516,7 @@ static void try_open_pad_locked(InputContext *ctx, const char *path)
     snprintf(pad->name, sizeof(pad->name), "%s", devname);
     pad->fd = fd;
     pad->hid_fd = -1;
+    pad->dsout_active = pad->dsout_wait_patch = pad->dsout_failed_logged = false;
     pad->touch_cid[0] = pad->touch_cid[1] = -1;
     resync_pad_locked(pad);
     pad_output_open(&pad->out, path, fd, id.vendor, id.bustype);
@@ -499,18 +540,22 @@ static void try_open_pad_locked(InputContext *ctx, const char *path)
             if (!cal_ok)
                 app_log_always("[INPUT]   motion: nominal scale + auto gyro bias (hold the pad still ~1 s)\n");
 
-            // Outputs over the same hidraw node; start from the session's current state.
-            ds_output_init(&pad->dsout, pad->hid_fd, id.bustype == 0x05 /* BUS_BLUETOOTH */);
-            ds_output_set_lightbar(&pad->dsout, ctx->led[0], ctx->led[1], ctx->led[2]);
-            ds_output_set_player(&pad->dsout, ctx->player_index);
-            ds_output_set_intensity(&pad->dsout, ctx->ds_intensity);
-            if (ctx->trig_valid && ctx->trigger_effects_enabled && !ctx->trig_intensity_off)
-                ds_output_set_triggers(&pad->dsout, ctx->trig_type_l, ctx->trig_l,
-                                       ctx->trig_type_r, ctx->trig_r);
-            pad->dsout_active = true;
-            app_log_always("[INPUT]   DualSense outputs: rumble, adaptive triggers%s, lightbar, player LEDs (%s)\n",
-                           ctx->trigger_effects_enabled ? "" : " (disabled)",
-                           id.bustype == 0x05 ? "BT report 0x31" : "USB report 0x02");
+            // Outputs over the same hidraw node.
+            bool bt = id.bustype == 0x05 /* BUS_BLUETOOTH */;
+            ds_output_init(&pad->dsout, pad->hid_fd, bt);
+            if (!bt) {
+                activate_dsout_locked(ctx, pad);
+            } else if (!ctx->bt_patch_enabled) {
+                app_log_always("[INPUT]   DualSense outputs off over Bluetooth (dualsense_bt_patch=false); "
+                               "connect by USB for rumble/triggers/lightbar\n");
+            } else {
+                // webOS's stack sends output reports in a form the DualSense
+                // ignores (and that can wedge its input when two overlap);
+                // hold them until btfix has fixed the stack (see bt_patch.h).
+                pad->dsout_wait_patch = true;
+                bt_patch_request();
+                app_log_always("[INPUT]   DualSense outputs over Bluetooth: waiting for btfix\n");
+            }
         } else {
             app_log_always("[INPUT]   DualSense raw HID unavailable (%s) — using evdev\n",
                            strerror(errno));
@@ -538,9 +583,10 @@ static void close_pad_locked(InputContext *ctx, int i, const char *why)
         // Best effort (the pad may already be gone): motors and triggers off.
         ds_output_set_rumble(&pad->dsout, 0, 0);
         ds_output_triggers_off(&pad->dsout);
-        ds_output_flush(&pad->dsout);
+        ds_output_flush_sync(&pad->dsout);
         pad->dsout_active = false;
     }
+    pad->dsout_wait_patch = false;
     if (pad->hid_fd >= 0) close(pad->hid_fd);
     pad->hid_fd = -1;
     ioctl(pad->fd, EVIOCGRAB, 0);
@@ -742,6 +788,7 @@ static void handle_hid_reports_locked(InputContext *ctx, int i)
                            pad->path, strerror(errno));
             close(pad->hid_fd);
             pad->hid_fd = -1;
+            pad->dsout_active = pad->dsout_wait_patch = false;   // its fd is gone
             resync_pad_locked(pad);
             publish_locked(ctx, ctx->session, false);
             return;
@@ -832,6 +879,9 @@ static void *evdev_reader(void *arg)
                     handle_pad_events_locked(ctx, i);
             }
         }
+
+        // ── Bluetooth DualSense outputs waiting for btfix ────────────────────
+        poll_bt_patch_locked(ctx);
 
         // ── Rumble (applied here so the chiaki callback never blocks on I/O) ─
         {
@@ -931,6 +981,7 @@ InputContext *input_init(const InputOptions *opt)
     ctx->dualsense_hid  = opt->dualsense_hid;
     ctx->motion_enabled = opt->motion;
     ctx->trigger_effects_enabled = opt->trigger_effects;
+    ctx->bt_patch_enabled = opt->dualsense_bt_patch;
     ctx->rumble_multiplier = 1.0f;
     ctx->led[2] = 0x40;          // dim blue until the PS5 sends its colour
     for (int i = 0; i < MAX_GAMEPADS; i++) ctx->pads[i].fd = -1;
@@ -982,7 +1033,7 @@ void input_set_session(InputContext *ctx, ChiakiSession *session)
         if (ctx->pads[i].fd >= 0 && ctx->pads[i].dsout_active) {
             ds_output_set_rumble(&ctx->pads[i].dsout, 0, 0);
             ds_output_triggers_off(&ctx->pads[i].dsout);
-            ds_output_flush(&ctx->pads[i].dsout);
+            ds_output_flush_sync(&ctx->pads[i].dsout);
         }
     }
     ctx->haptic_count = 0;
@@ -1132,7 +1183,7 @@ void input_fini(InputContext *ctx)
             if (ctx->pads[i].dsout_active) {
                 ds_output_set_rumble(&ctx->pads[i].dsout, 0, 0);
                 ds_output_triggers_off(&ctx->pads[i].dsout);
-                ds_output_flush(&ctx->pads[i].dsout);
+                ds_output_flush_sync(&ctx->pads[i].dsout);
             }
             if (ctx->pads[i].hid_fd >= 0) close(ctx->pads[i].hid_fd);
             ioctl(ctx->pads[i].fd, EVIOCGRAB, 0);

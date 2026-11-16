@@ -13,6 +13,7 @@ typedef struct {
     bool        dualsense_hid;     // config "dualsense_hid": raw HID backend for DualSense
     bool        motion;            // config "motion": forward DualSense gyro/accel
     bool        trigger_effects;   // config "trigger_effects": DualSense adaptive triggers
+    bool        dualsense_bt_patch; // config "dualsense_bt_patch": run btfix for BT DualSense outputs
 } InputOptions;
 
 InputContext *input_init(const InputOptions *opt);

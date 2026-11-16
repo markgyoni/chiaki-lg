@@ -86,10 +86,17 @@ void ds_motion_reset(DsMotion *m);
 
 /* ── Outputs (Stage 7): rumble, adaptive triggers, lightbar, player LEDs ──── */
 
+/* Minimum gap between two output reports.  On webOS Bluetooth two reports
+ * landing a few ms apart wedged the pad's input stream until it was power-
+ * cycled; one report per input-thread tick (30 ms) is plenty for rumble. */
+#define DS_OUTPUT_MIN_INTERVAL_BT_MS   25
+#define DS_OUTPUT_MIN_INTERVAL_USB_MS   8
+
 typedef struct {
     int      fd;            /* hidraw, borrowed */
     bool     bt;            /* Bluetooth: report 0x31 + CRC32; USB: report 0x02 */
     uint8_t  seq;
+    long     last_write_ms; /* CLOCK_MONOTONIC of the last report sent, 0 = never */
 
     bool     setup_done;    /* lightbar fade-out sent (takes over from firmware) */
 
@@ -108,6 +115,10 @@ void ds_output_triggers_off(DsOutput *o);
 void ds_output_set_intensity(DsOutput *o, uint8_t intensity);
 void ds_output_set_lightbar(DsOutput *o, uint8_t r, uint8_t g, uint8_t b);
 void ds_output_set_player(DsOutput *o, uint8_t player_index);
-/* Send one output report carrying everything that changed.  Returns false if
- * the write failed. */
+/* Send one output report carrying everything that changed.  If the previous
+ * report went out less than the minimum interval ago nothing is sent and the
+ * changes stay pending for the next call.  Returns false if the write failed. */
 bool ds_output_flush(DsOutput *o);
+/* Like ds_output_flush but waits out the minimum interval first, so the report
+ * is always sent.  For shutdown paths (motors/triggers off). */
+bool ds_output_flush_sync(DsOutput *o);

@@ -1288,6 +1288,7 @@ int main(int argc, char *argv[])
         .dualsense_hid = cfg.dualsense_hid,
         .motion = cfg.motion,
         .trigger_effects = cfg.trigger_effects,
+        .dualsense_bt_patch = cfg.dualsense_bt_patch,
     };
     InputContext *input_ctx = input_init(&input_opt);
     g_input_ctx = input_ctx;
