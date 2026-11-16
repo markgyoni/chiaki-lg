@@ -144,6 +144,9 @@ static void session_event_cb(ChiakiEvent *event, void *user)
         // left = low-frequency (strong) motor, right = high-frequency (weak)
         input_set_rumble(g_input_ctx, event->rumble.left, event->rumble.right);
         break;
+    case CHIAKI_EVENT_MOTION_RESET:
+        input_motion_reset(g_input_ctx);
+        break;
     case CHIAKI_EVENT_QUIT:
         // Log the reason so we can diagnose what triggered the disconnect.
         app_log_always("[APP] Session quit: reason=%d (%s) reason_str=%s\n",
@@ -1266,6 +1269,7 @@ int main(int argc, char *argv[])
         .profile_override = cfg.controller_profile,
         .rumble = cfg.rumble,
         .dualsense_hid = cfg.dualsense_hid,
+        .motion = cfg.motion,
     };
     InputContext *input_ctx = input_init(&input_opt);
     g_input_ctx = input_ctx;

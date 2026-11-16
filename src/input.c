@@ -102,6 +102,7 @@ typedef struct {
     int8_t       touch_cid[2];  // chiaki touch id per DualSense touch slot, -1 = up
     uint8_t      touch_did[2];  // DualSense contact id for that slot
     struct timespec ds_log_ts;
+    DsMotion     motion;        // gyro/accel → chiaki motion + orientation (Stage 6)
 } GamepadDev;
 
 struct InputContext {
@@ -118,6 +119,7 @@ struct InputContext {
     char          profile_override[32];
     bool          rumble_enabled;
     bool          dualsense_hid;                // use the DualSense raw HID backend
+    bool          motion_enabled;               // forward gyro/accel (config "motion")
     uint8_t       rumble_strong, rumble_weak;   // latest PS5 rumble request
 
     // Haptics → rumble (PS5 DualSense mode).  One strength value per haptics
@@ -473,8 +475,15 @@ static void try_open_pad_locked(InputContext *ctx, const char *path)
             // returns EIO but the switch still happens (Stage 0 finding).
             uint8_t feat[64] = { 0x05 };
             int r = ioctl(pad->hid_fd, HIDIOCGFEATURE(sizeof(feat)), feat);
-            app_log_always("[INPUT]   DualSense raw HID backend on (calibration request: %s)\n",
-                           r >= 0 ? "OK" : strerror(errno));
+            int feat_errno = errno;
+            DsCalib cal;
+            bool cal_ok = r > 0 && ds_parse_calibration(feat, (size_t)r, &cal);
+            ds_motion_init(&pad->motion, cal_ok ? &cal : NULL);
+            app_log_always("[INPUT]   DualSense raw HID backend on (calibration: %s)\n",
+                           cal_ok ? "factory"
+                                  : r < 0 ? strerror(feat_errno) : "unparsable");
+            if (!cal_ok)
+                app_log_always("[INPUT]   motion: nominal scale + auto gyro bias (hold the pad still ~1 s)\n");
         } else {
             app_log_always("[INPUT]   DualSense raw HID unavailable (%s) — using evdev\n",
                            strerror(errno));
@@ -649,8 +658,11 @@ static void ds_apply_locked(InputContext *ctx, GamepadDev *pad, const DsInputSta
     st->right_y  = normalize_axis(ds->ry, 0, 255);
     st->l2_state = ds->l2;
     st->r2_state = ds->r2;
-    if (ds->full)
+    if (ds->full) {
         ds_apply_touch_locked(pad, ds);
+        if (ctx->motion_enabled)
+            ds_motion_update(&pad->motion, ds, st);
+    }
 
     if (ctx->debug) {
         const DsInputState *o = &pad->ds_last;
@@ -666,6 +678,15 @@ static void ds_apply_locked(InputContext *ctx, GamepadDev *pad, const DsInputSta
                            ds->touch[1].active ? "+" : "-", ds->touch[1].x, ds->touch[1].y,
                            ds->gyro[0], ds->gyro[1], ds->gyro[2],
                            ds->accel[0], ds->accel[1], ds->accel[2]);
+            app_log_always("[DS]   motion: gyro=%.3f,%.3f,%.3f rad/s accel=%.2f,%.2f,%.2f g "
+                           "orient=%.2f,%.2f,%.2f,%.2f bias=%s%.0f,%.0f,%.0f\n",
+                           st->gyro_x, st->gyro_y, st->gyro_z,
+                           st->accel_x, st->accel_y, st->accel_z,
+                           st->orient_x, st->orient_y, st->orient_z, st->orient_w,
+                           pad->motion.cal.valid ? "factory " :
+                           pad->motion.auto_bias_valid ? "auto " : "none ",
+                           pad->motion.auto_bias[0], pad->motion.auto_bias[1],
+                           pad->motion.auto_bias[2]);
         }
     }
     pad->ds_last = *ds;
@@ -859,6 +880,7 @@ InputContext *input_init(const InputOptions *opt)
     ctx->debug   = opt->debug;
     ctx->rumble_enabled = opt->rumble;
     ctx->dualsense_hid  = opt->dualsense_hid;
+    ctx->motion_enabled = opt->motion;
     for (int i = 0; i < MAX_GAMEPADS; i++) ctx->pads[i].fd = -1;
     snprintf(ctx->profile_override, sizeof(ctx->profile_override), "%s",
              (opt->profile_override && opt->profile_override[0]) ? opt->profile_override : "auto");
@@ -918,6 +940,17 @@ void input_set_rumble(InputContext *ctx, uint8_t strong, uint8_t weak)
     ctx->rumble_strong = strong;
     ctx->rumble_weak   = weak;
     pthread_mutex_unlock(&ctx->state_mutex);
+}
+
+void input_motion_reset(InputContext *ctx)
+{
+    if (!ctx) return;
+    pthread_mutex_lock(&ctx->state_mutex);
+    for (int i = 0; i < MAX_GAMEPADS; i++)
+        if (ctx->pads[i].fd >= 0 && ctx->pads[i].hid_fd >= 0)
+            ds_motion_reset(&ctx->pads[i].motion);
+    pthread_mutex_unlock(&ctx->state_mutex);
+    app_log_always("[INPUT] motion reset requested by the PS5\n");
 }
 
 void input_push_haptics(InputContext *ctx, const uint8_t *buf, size_t buf_size)

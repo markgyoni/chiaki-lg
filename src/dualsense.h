@@ -43,3 +43,43 @@ typedef struct {
 bool ds_parse_input(const uint8_t *rep, size_t len, DsInputState *out);
 
 bool ds_is_dualsense(uint16_t vendor, uint16_t product);
+
+/* ── Motion (Stage 6) ──────────────────────────────────────────────────────── */
+
+#include <chiaki/orientation.h>
+
+/* Factory IMU calibration from feature report 0x05 (hid-playstation layout). */
+typedef struct {
+    bool valid;
+    int  gyro_bias[3], gyro_numer[3], gyro_denom[3];   /* → 1/1024 deg/s */
+    int  acc_bias[3],  acc_numer[3],  acc_denom[3];    /* → 1/8192 g */
+} DsCalib;
+
+bool ds_parse_calibration(const uint8_t *buf, size_t len, DsCalib *c);
+
+typedef struct {
+    DsCalib  cal;
+    /* Runtime gyro bias (raw units) used when no factory calibration is
+     * available — on webOS the calibration request fails (uhid EIO).  Updated
+     * whenever the pad has been still for ~1 s. */
+    float    auto_bias[3];
+    bool     auto_bias_valid;
+    int      still_count;
+    long     still_sum[3];
+    int16_t  still_ref[3];
+
+    bool     have_ts;
+    uint32_t last_ts;
+    uint64_t ts_us;
+    float    last_accel[3];
+
+    ChiakiOrientationTracker tracker;
+    ChiakiAccelNewZero       accel_zero;
+} DsMotion;
+
+void ds_motion_init(DsMotion *m, const DsCalib *cal);
+/* Feed one full report; writes gyro (rad/s), accel (g) and orientation into
+ * the controller state. */
+void ds_motion_update(DsMotion *m, const DsInputState *s, ChiakiControllerState *st);
+/* CHIAKI_EVENT_MOTION_RESET: re-zero orientation around the current pose. */
+void ds_motion_reset(DsMotion *m);
