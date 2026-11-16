@@ -105,6 +105,7 @@ typedef struct {
     struct timespec ds_log_ts;
     DsMotion     motion;        // gyro/accel → chiaki motion + orientation (Stage 6)
     DsOutput     dsout;         // rumble/triggers/lightbar (Stage 7)
+    uint16_t     bus, vendor, product;  // evdev input_id, for the UI
     bool         dsout_active;
     bool         dsout_wait_patch;  // BT DualSense: outputs held until btfix is active
     bool         dsout_failed_logged;
@@ -514,6 +515,9 @@ static void try_open_pad_locked(InputContext *ctx, const char *path)
 
     snprintf(pad->path, sizeof(pad->path), "%s", path);
     snprintf(pad->name, sizeof(pad->name), "%s", devname);
+    pad->bus = id.bustype;
+    pad->vendor = id.vendor;
+    pad->product = id.product;
     pad->fd = fd;
     pad->hid_fd = -1;
     pad->dsout_active = pad->dsout_wait_patch = pad->dsout_failed_logged = false;
@@ -1011,6 +1015,82 @@ InputContext *input_init(const InputOptions *opt)
 
     pthread_create(&ctx->reader_thread, NULL, evdev_reader, ctx);
     return ctx;
+}
+
+void input_reconfigure(InputContext *ctx, const InputOptions *opt)
+{
+    if (!ctx || !opt) return;
+    pthread_mutex_lock(&ctx->state_mutex);
+    ctx->debug          = opt->debug;
+    ctx->rumble_enabled = opt->rumble;
+    ctx->dualsense_hid  = opt->dualsense_hid;
+    ctx->motion_enabled = opt->motion;
+    ctx->trigger_effects_enabled = opt->trigger_effects;
+    ctx->bt_patch_enabled = opt->dualsense_bt_patch;
+    snprintf(ctx->profile_override, sizeof(ctx->profile_override), "%s",
+             (opt->profile_override && opt->profile_override[0]) ? opt->profile_override : "auto");
+    app_log_always("[INPUT] reconfigured: controller_profile=%s rumble=%s dualsense_hid=%s motion=%s "
+                   "trigger_effects=%s dualsense_bt_patch=%s — reopening gamepads\n",
+                   ctx->profile_override, opt->rumble ? "on" : "off", opt->dualsense_hid ? "on" : "off",
+                   opt->motion ? "on" : "off", opt->trigger_effects ? "on" : "off",
+                   opt->dualsense_bt_patch ? "on" : "off");
+    for (int i = 0; i < MAX_GAMEPADS; i++)
+        close_pad_locked(ctx, i, "settings changed");
+    scan_pads_locked(ctx);
+    pthread_mutex_unlock(&ctx->state_mutex);
+}
+
+void input_get_state(InputContext *ctx, ChiakiControllerState *out)
+{
+    chiaki_controller_state_set_idle(out);
+    if (!ctx) return;
+    pthread_mutex_lock(&ctx->state_mutex);
+    for (int i = 0; i < MAX_GAMEPADS; i++) {
+        if (ctx->pads[i].fd < 0) continue;
+        ChiakiControllerState merged;
+        chiaki_controller_state_or(&merged, out, &ctx->pads[i].state);
+        *out = merged;
+    }
+    pthread_mutex_unlock(&ctx->state_mutex);
+}
+
+int input_get_pads(InputContext *ctx, InputPadInfo *out, int max)
+{
+    if (!ctx) return 0;
+    int n = 0;
+    pthread_mutex_lock(&ctx->state_mutex);
+    for (int i = 0; i < MAX_GAMEPADS; i++) {
+        GamepadDev *pad = &ctx->pads[i];
+        if (pad->fd < 0) continue;
+        if (n < max) {
+            InputPadInfo *p = &out[n];
+            memset(p, 0, sizeof(*p));
+            snprintf(p->name, sizeof(p->name), "%s", pad->name);
+            snprintf(p->connection, sizeof(p->connection), "%s",
+                     pad->bus == 0x03 ? "USB" : pad->bus == 0x05 ? "Bluetooth" : "Other");
+            snprintf(p->profile, sizeof(p->profile), "%s", pad->profile.id);
+            p->dualsense = ds_is_dualsense(pad->vendor, pad->product);
+            p->raw_hid = pad->hid_fd >= 0;
+            if (pad->dsout_active) {
+                p->outputs_active = true;
+                snprintf(p->outputs, sizeof(p->outputs), "Vibration, adaptive triggers, lightbar%s",
+                         pad->dsout.bt ? " (Bluetooth fix active)" : "");
+            } else if (pad->dsout_wait_patch) {
+                snprintf(p->outputs, sizeof(p->outputs), "Applying Bluetooth fix...");
+            } else if (p->dualsense && p->raw_hid && pad->bus == 0x05) {
+                snprintf(p->outputs, sizeof(p->outputs), "Vibration over USB only (%s)",
+                         ctx->bt_patch_enabled ? "Bluetooth fix unavailable" : "Bluetooth fix off");
+            } else if (pad->out.kind != PAD_OUT_NONE) {
+                p->outputs_active = true;
+                snprintf(p->outputs, sizeof(p->outputs), "Vibration");
+            } else {
+                snprintf(p->outputs, sizeof(p->outputs), "No vibration");
+            }
+        }
+        n++;
+    }
+    pthread_mutex_unlock(&ctx->state_mutex);
+    return n;
 }
 
 void input_set_session(InputContext *ctx, ChiakiSession *session)
