@@ -183,7 +183,7 @@ static void draw_text(SDL_Renderer *r, int x, int y, const char *text, int scale
         if (len >= sizeof(line)) len = sizeof(line) - 1;
         memcpy(line, p, len); line[len] = '\0';
         ui_text_draw(r, x, y + top_adj, line, px, UI_FONT_REGULAR, c, UI_ALIGN_LEFT);
-        y += 9 * scale;
+        y += ui_text_line_height(px);
         p = nl ? nl + 1 : NULL;
     }
 }
@@ -215,89 +215,6 @@ static void fill_rounded_rect(SDL_Renderer *r, int x, int y, int w, int h, int r
 static void hline(SDL_Renderer *r, int x, int y, int w)
 {
     fill_rect(r, x, y, w, 1);
-}
-
-/* ── Code block ─────────────────────────────────────────────────────────── */
-
-static void draw_code_block(SDL_Renderer *r, int x, int y, int w,
-                             const char *text, int scale)
-{
-    int lines = 1;
-    for (const char *p = text; *p; p++) if (*p == '\n') lines++;
-    int h = lines * 9 * scale + 20;
-
-    set_color(r, COL_CODE_BG);
-    fill_rounded_rect(r, x, y, w, h, 8);
-    set_color(r, COL_ACCENT_DARK);
-    fill_rect(r, x, y, 4, h);
-    set_color(r, COL_TEXT_CODE);
-    draw_text(r, x + 16, y + 10, text, scale);
-}
-
-/* ── Step progress badge ────────────────────────────────────────────────── */
-
-/* Draw a single numbered step badge (44×44) at top-left corner (bx, by).
- * done   = step completed  → green fill, "OK" label
- * active = current step    → blue fill, white number
- * else   = future step     → dim border, dim number
- */
-static void draw_step_badge(SDL_Renderer *r, int bx, int by, int size,
-                             int num, bool done, bool active)
-{
-    int radius = size / 5;
-
-    /* Badge fill */
-    if (done) {
-        set_color(r, COL_SUCCESS);
-    } else if (active) {
-        set_color(r, COL_ACCENT);
-    } else {
-        set_color(r, COL_BORDER_DIM);
-    }
-    fill_rounded_rect(r, bx, by, size, size, radius);
-
-    /* Inner border highlight for active */
-    if (active) {
-        set_color(r, 0x40, 0x90, 0xff, 0xff);
-        fill_rounded_rect(r, bx + 2, by + 2, size - 4, size - 4, radius - 1);
-        set_color(r, COL_ACCENT);
-        fill_rounded_rect(r, bx + 3, by + 3, size - 6, size - 6, radius - 2);
-    }
-
-    /* Content text — vertically centred */
-    int text_y = by + (size - 14) / 2;  /* 14 = 7 * scale2 */
-    if (done) {
-        set_color(r, 0x00, 0x20, 0x0c, 0xff);
-        draw_text_centered(r, bx + size / 2, text_y, "OK", 2);
-    } else {
-        set_color(r, active ? COL_TEXT : COL_TEXT_FAINT);
-        char s[2] = { '0' + (char)num, '\0' };
-        draw_text_centered(r, bx + size / 2, text_y, s, 2);
-    }
-}
-
-/* ── Status pill ────────────────────────────────────────────────────────── */
-
-static int draw_status_pill(SDL_Renderer *r, int x, int y,
-                             const char *label, bool ok)
-{
-    int tw = text_width(label, 2);
-    int pw = tw + 28;
-    int ph = 34;
-
-    if (ok) {
-        set_color(r, COL_SUCCESS_BG);
-        fill_rounded_rect(r, x, y, pw, ph, ph / 2);
-        set_color(r, COL_SUCCESS);
-        fill_rect(r, x + 6, y + ph/2 - 1, 8, 2);  /* mini tick left */
-        draw_text(r, x + 18, y + (ph - 14) / 2, label, 2);
-    } else {
-        set_color(r, COL_ERROR_BG);
-        fill_rounded_rect(r, x, y, pw, ph, ph / 2);
-        set_color(r, COL_ERROR);
-        draw_text(r, x + 14, y + (ph - 14) / 2, label, 2);
-    }
-    return pw + 12;
 }
 
 /* ── Button ─────────────────────────────────────────────────────────────── */
@@ -343,48 +260,28 @@ static void draw_button(SDL_Renderer *r, int x, int y, int w, int h,
     }
 }
 
-/* ── Input box ──────────────────────────────────────────────────────────── */
+/* ── Launcher (TV layout: big text, two columns) ────────────────────────── */
 
-static void draw_input_box(SDL_Renderer *r, int x, int y, int w, int h,
-                           const char *text, int cursor, bool focused)
+static SDL_Color rgba(int R, int G, int B, int A) { SDL_Color c = { (Uint8)R, (Uint8)G, (Uint8)B, (Uint8)A }; return c; }
+#define C(name) rgba(name)
+
+/* Large button with TrueType label.  primary = accent-coloured when idle too. */
+static void big_button(SDL_Renderer *r, int x, int y, int w, int h, const char *label,
+                       bool focused, bool enabled, bool primary)
 {
-    int radius = 10;
-
-    /* Background */
-    set_color(r, COL_CODE_BG);
-    fill_rounded_rect(r, x, y, w, h, radius);
-
-    /* Border — thicker + brighter when focused */
     if (focused) {
-        set_color(r, COL_ACCENT);
-        draw_rect_outline(r, x,     y,     w,     h);
-        draw_rect_outline(r, x + 1, y + 1, w - 2, h - 2);
-    } else {
-        set_color(r, COL_BORDER);
-        draw_rect_outline(r, x, y, w, h);
-    }
-
-    int scale = 3;
-    int ty = y + (h - 7 * scale) / 2;
-    int tx = x + 20;
-
-    if (text && text[0]) {
         set_color(r, COL_TEXT);
-        draw_text(r, tx, ty, text, scale);
-    } else {
-        set_color(r, COL_TEXT_FAINT);
-        draw_text(r, tx, ty, "192.168.x.x", scale);
+        fill_rounded_rect(r, x - 4, y - 4, w + 8, h + 8, 16);
     }
-
-    /* Blinking cursor */
-    if (focused && ((SDL_GetTicks() / 500) % 2) == 0) {
-        int cx = tx + cursor * (6 * scale);
-        set_color(r, COL_TEXT);
-        fill_rect(r, cx, ty, 2, 7 * scale);
-    }
+    if (!enabled)        set_color(r, COL_BORDER_DIM);
+    else if (focused)    set_color(r, COL_ACCENT);
+    else if (primary)    set_color(r, COL_ACCENT_DARK);
+    else                 set_color(r, COL_CARD);
+    fill_rounded_rect(r, x, y, w, h, 14);
+    SDL_Color tc = enabled ? C(COL_TEXT) : C(COL_TEXT_FAINT);
+    ui_text_draw(r, x + w / 2, y + (h - ui_text_line_height(38)) / 2, label, 38,
+                 UI_FONT_SEMIBOLD, tc, UI_ALIGN_CENTER);
 }
-
-/* ── Setup screen ───────────────────────────────────────────────────────── */
 
 static void render_setup_screen(SDL_Renderer *r, const char *status,
                                 const char *ip, int focus,
@@ -392,332 +289,147 @@ static void render_setup_screen(SDL_Renderer *r, const char *status,
                                 bool has_keys,
                                 bool can_import,
                                 bool can_connect,
-                                bool show_keypad)
+                                bool show_keypad,
+                                struct InputContext *input)
 {
-    /* Determine current step (1-3) for progress display */
-    int step;
-    if (can_connect)        step = 3;   /* everything ready */
-    else if (has_keys)      step = 2;   /* have keys, need valid IP */
-    else                    step = 1;   /* need keys first */
+    (void)status;
+    ui_text_init(r);
+    const int M = 64, TOP = 150, LW = 900, RX = M + LW + 64, RW = SCREEN_W - RX - M;
+    const int FOOT_Y = SCREEN_H - 76;
 
-    /* ── Background ──────────────────────────────────────────────────────── */
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
     set_color(r, COL_BG);
     fill_rect(r, 0, 0, SCREEN_W, SCREEN_H);
 
-    /* Very top vignette */
-    set_color(r, COL_BG_DEEPER);
-    fill_rect(r, 0, 0, SCREEN_W, 60);
-
-    /* ── Header band ─────────────────────────────────────────────────────── */
-    set_color(r, COL_PANEL);
-    fill_rect(r, 0, HDR_Y, SCREEN_W, HDR_H);
-
-    /* Bottom border of header */
-    set_color(r, COL_BORDER_DIM);
-    hline(r, 0, HDR_Y + HDR_H - 1, SCREEN_W);
-
-    /* Left PS blue accent bar */
+    /* ── Header ── */
     set_color(r, COL_ACCENT);
-    fill_rect(r, 0, HDR_Y, 8, HDR_H);
-
-    /* App name */
-    set_color(r, COL_TEXT);
-    draw_text(r, 36, HDR_Y + 10, "CHIAKI", 4);
-
-    /* Subtitle */
-    set_color(r, COL_TEXT_DIM);
-    draw_text(r, 36, HDR_Y + 50, "PS5 Remote Play for webOS", 2);
-
-    /* Version + build, so it is obvious which build is installed */
-    set_color(r, COL_TEXT_FAINT);
-    draw_text(r, 36 + text_width("CHIAKI", 4) + 24, HDR_Y + 24,
-              "v" APP_VERSION " (" APP_GIT ")", 2);
-
-    /* Right side: connection readiness */
-    if (can_connect) {
-        char ps5str[80];
-        snprintf(ps5str, sizeof(ps5str), "PS5:  %s", ip ? ip : "");
-        int sw = text_width(ps5str, 2);
-        set_color(r, COL_TEXT_DIM);
-        draw_text(r, SCREEN_W - sw - 48, HDR_Y + 14, ps5str, 2);
-        set_color(r, COL_SUCCESS);
-        draw_text(r, SCREEN_W - text_width("Ready to connect", 2) - 48,
-                  HDR_Y + 42, "Ready to connect", 2);
-    } else {
-        set_color(r, COL_TEXT_FAINT);
-        draw_text(r, SCREEN_W - text_width("Setup required", 2) - 48,
-                  HDR_Y + 28, "Setup required", 2);
+    fill_rect(r, 0, 0, SCREEN_W, 6);
+    ui_text_draw(r, M, 28, "Chiaki-lg", 60, UI_FONT_BOLD, C(COL_TEXT), UI_ALIGN_LEFT);
+    ui_text_draw(r, M + ui_text_width("Chiaki-lg", 60, UI_FONT_BOLD) + 28, 50,
+                 "PS5 Remote Play for LG TVs", 32, UI_FONT_REGULAR, C(COL_TEXT_DIM), UI_ALIGN_LEFT);
+    {
+        const char *st = can_connect ? "Ready to connect" : "Setup needed";
+        int tw = ui_text_width(st, 30, UI_FONT_SEMIBOLD);
+        int cx = SCREEN_W - M - tw - 40;
+        set_color(r, can_connect ? COL_SUCCESS_BG : COL_WARNING_BG);
+        fill_rounded_rect(r, cx, 30, tw + 40, 54, 27);
+        ui_text_draw(r, cx + 20, 30 + (54 - ui_text_line_height(30)) / 2, st, 30, UI_FONT_SEMIBOLD,
+                     can_connect ? C(COL_SUCCESS) : C(COL_WARNING), UI_ALIGN_LEFT);
+        ui_text_draw(r, SCREEN_W - M, 94, "v" APP_VERSION " (" APP_GIT ")", 24, UI_FONT_REGULAR,
+                     C(COL_TEXT_FAINT), UI_ALIGN_RIGHT);
     }
 
-    /* ── Left panel ──────────────────────────────────────────────────────── */
-    set_color(r, COL_PANEL);
-    fill_rounded_rect(r, LEFT_X, CONTENT_Y, LEFT_W, CONTENT_H, 14);
-
-    /* Left accent strip */
-    set_color(r, COL_ACCENT_DARK);
-    fill_rect(r, LEFT_X, CONTENT_Y + 14, 4, CONTENT_H - 28);
-    set_color(r, COL_ACCENT);
-    /* Highlight the strip portion matching current step */
-    int strip_seg = (CONTENT_H - 28) / 3;
-    fill_rect(r, LEFT_X, CONTENT_Y + 14 + (step - 1) * strip_seg, 4, strip_seg);
-
-    /* ── Step progress row (inside left panel) ───────────────────────────── */
-    const int BADGE_SZ = 44;
-    const int STEP_Y   = CONTENT_Y + 32;
-
-    /* Three badge centre-x positions within the left panel */
-    static const int STEP_OFFSETS[3] = { 110, 340, 570 };
-
-    /* Connecting lines between badges */
-    for (int i = 0; i < 2; i++) {
-        int lx1 = LEFT_X + STEP_OFFSETS[i] + BADGE_SZ / 2;
-        int lx2 = LEFT_X + STEP_OFFSETS[i + 1] - BADGE_SZ / 2;
-        int ly  = STEP_Y + BADGE_SZ / 2;
-        /* Base line */
-        set_color(r, COL_BORDER_DIM);
-        fill_rect(r, lx1, ly - 1, lx2 - lx1, 3);
-        /* Progress overlay */
-        if (i + 2 <= step) {
-            set_color(r, (step == 3) ? COL_SUCCESS : COL_ACCENT_MID);
-            fill_rect(r, lx1, ly - 1, lx2 - lx1, 3);
+    /* ── Left: address + actions ── */
+    int y = TOP;
+    ui_text_draw(r, M, y, "PS5 address", 30, UI_FONT_SEMIBOLD, C(COL_TEXT_DIM), UI_ALIGN_LEFT);
+    y += 46;
+    {
+        bool f = focus == 0 || show_keypad;
+        if (f) { set_color(r, COL_ACCENT); fill_rounded_rect(r, M - 4, y - 4, LW + 8, 112, 16); }
+        set_color(r, COL_CODE_BG);
+        fill_rounded_rect(r, M, y, LW, 104, 14);
+        const char *shown = (ip && ip[0]) ? ip : "192.168.x.x";
+        ui_text_draw(r, M + 32, y + (104 - ui_text_line_height(52)) / 2, shown, 52, UI_FONT_SEMIBOLD,
+                     (ip && ip[0]) ? C(COL_TEXT) : C(COL_TEXT_FAINT), UI_ALIGN_LEFT);
+        if (f && ip && (SDL_GetTicks() / 500) % 2 == 0) {
+            int cx = M + 32 + ui_text_width(ip, 52, UI_FONT_SEMIBOLD) + 4;
+            set_color(r, COL_TEXT);
+            fill_rect(r, cx, y + 26, 3, 52);
         }
+        if (!show_keypad && f)
+            ui_text_draw(r, M + LW - 28, y + (104 - ui_text_line_height(26)) / 2, "OK to edit", 26,
+                         UI_FONT_REGULAR, C(COL_TEXT_DIM), UI_ALIGN_RIGHT);
     }
-
-    /* Step badges */
-    static const char *STEP_LABELS[3] = { "GET KEYS", "PS5 IP", "CONNECT" };
-    for (int i = 0; i < 3; i++) {
-        bool done   = (i + 1 < step);
-        bool active = (i + 1 == step);
-        int bx = LEFT_X + STEP_OFFSETS[i] - BADGE_SZ / 2;
-        draw_step_badge(r, bx, STEP_Y, BADGE_SZ, i + 1, done, active);
-        /* Label below */
-        set_color(r,
-            done   ? COL_SUCCESS :
-            active ? COL_TEXT    : COL_TEXT_FAINT);
-        draw_text_centered(r, LEFT_X + STEP_OFFSETS[i],
-                           STEP_Y + BADGE_SZ + 8, STEP_LABELS[i], 1);
-    }
-
-    /* Divider below step row */
-    set_color(r, COL_BORDER_DIM);
-    hline(r, LEFT_X + 20, STEP_Y + BADGE_SZ + 28, LEFT_W - 40);
-
-    /* ── Step-specific instructions ──────────────────────────────────────── */
-    int ix = LEFT_X + 22;
-    int iy = STEP_Y + BADGE_SZ + 46;
-    int iw = LEFT_W - 44;
-
-    if (step == 1) {
-        set_color(r, COL_ACCENT);
-        draw_text(r, ix, iy, "Import chiaki-ng settings", 2);
-        iy += 32;
-
-        set_color(r, COL_TEXT_DIM);
-        draw_text(r, ix, iy, "On your PC:", 2);
-        iy += 22;
-
-        set_color(r, COL_TEXT);
-        draw_text(r, ix + 14, iy, "1. Open chiaki-ng on computer", 2); iy += 20;
-        draw_text(r, ix + 14, iy, "2. Settings -> Config -> Export Settings To File", 2); iy += 20;
-        draw_text(r, ix + 14, iy, "3. Save chiaki-ng-Default.ini", 2); iy += 32;
-
-        set_color(r, COL_TEXT_DIM);
-        draw_text(r, ix, iy, "Copy to the TV via ADB:", 2); iy += 22;
-
-        draw_code_block(r, ix, iy, iw,
-            "adb push chiaki-ng-Default.ini \\\n"
-            " /media/developer/apps/usr/palm/\n"
-            " applications/org.homebrew.chiaki/", 2);
-        iy += 114;
-
-		set_color(r, COL_TEXT_DIM);
-        draw_text(r, ix, iy, "Or use WebOS Dev Manager for copying file to:", 2); iy += 22;
-		
-		draw_code_block(r, ix, iy, iw,
-            " /media/developer/apps/usr/palm/\n"
-            " applications/org.homebrew.chiaki/", 2);
-        iy += 114;
-
-        set_color(r, COL_TEXT_DIM);
-        draw_text(r, ix, iy, "Then on this screen:", 2); iy += 22;
-        set_color(r, COL_TEXT);
-        draw_text(r, ix + 14, iy, "1. Enter your PS5 IP address", 2); iy += 20;
-        draw_text(r, ix + 14, iy, "2. Press  Import Config", 2);
-
-    } else if (step == 2) {
-        set_color(r, COL_ACCENT);
-        draw_text(r, ix, iy, "Enter your PS5 IP address", 2);
-        iy += 32;
-
-        set_color(r, COL_TEXT_DIM);
-        draw_text(r, ix, iy, "Find it on your PS5:", 2);
-        iy += 22;
-
-        set_color(r, COL_TEXT);
-        draw_text(r, ix + 14, iy, "Settings", 2); iy += 18;
-        draw_text(r, ix + 22, iy, "-> Network", 2); iy += 18;
-        draw_text(r, ix + 30, iy, "-> Connection Status", 2); iy += 18;
-        draw_text(r, ix + 38, iy, "-> View Connection Status", 2); iy += 30;
-
-        set_color(r, COL_TEXT_DIM);
-        draw_text(r, ix, iy, "Look for  IP Address:", 2); iy += 22;
-        draw_code_block(r, ix, iy, iw, "e.g.  192.168.1.50", 2);
-        iy += 52;
-
-        /* Keys status — already done at this point */
-        set_color(r, COL_SUCCESS);
-        draw_text(r, ix, iy, "Registration keys: OK", 2); iy += 22;
-        set_color(r, COL_TEXT_DIM);
-        draw_text(r, ix, iy, "Just need a valid IP to connect.", 2);
-
-    } else {
-        /* Step 3 — ready */
-        set_color(r, COL_ACCENT);
-        draw_text(r, ix, iy, "Ready to stream", 2);
-        iy += 32;
-
-        set_color(r, COL_SUCCESS);
-        draw_text(r, ix, iy, "Registration keys:  OK", 2); iy += 24;
-
-        char ip_line[80];
-        snprintf(ip_line, sizeof(ip_line), "PS5 IP address:     %s", ip ? ip : "?");
-        draw_text(r, ix, iy, ip_line, 2); iy += 40;
-
-        set_color(r, COL_TEXT_DIM);
-        draw_text(r, ix, iy, "Press  Connect  to begin streaming.", 2); iy += 22;
-        draw_text(r, ix, iy, "If wakeup is configured the PS5 will", 2); iy += 20;
-        draw_text(r, ix, iy, "wake automatically from rest mode.", 2);
-    }
-
-    /* ── Right panel ─────────────────────────────────────────────────────── */
-    set_color(r, COL_ELEVATED);
-    fill_rounded_rect(r, RIGHT_X, CONTENT_Y, RIGHT_W, CONTENT_H, 14);
-
-    /* Right panel right accent strip (subtle) */
-    set_color(r, COL_BORDER_DIM);
-    fill_rect(r, RIGHT_X + RIGHT_W - 4, CONTENT_Y + 14, 4, CONTENT_H - 28);
-
-    int rx = RIGHT_X + 52;
-    int ry = CONTENT_Y + 52;
-    int rw = RIGHT_W - 104;
-
-    /* ── IP address field ───────────────────────────────────────────────── */
-    set_color(r, COL_TEXT_DIM);
-    draw_text(r, rx, ry, "PS5 IP ADDRESS", 2);
-    ry += 26;
-
-    bool ip_box_focused = (focus == 0) || show_keypad;
-    int ip_cursor = ip ? (int)strlen(ip) : 0;
-    draw_input_box(r, rx, ry, rw, 72, ip, ip_cursor, ip_box_focused);
-    ry += 72 + 20;
+    y += 104 + 40;
 
     if (show_keypad) {
-        /* ── On-screen numeric keypad ───────────────────────────────────── */
-        set_color(r, COL_TEXT_DIM);
-        draw_text(r, rx, ry, "ENTER IP  (arrows + OK)", 2);
-        ry += 26;
-
-        static const char *KEYS[12] = {
-            "1","2","3","4","5","6","7","8","9",".","0","DEL"
-        };
-        const int KW = 128, KH = 64, KGAP = 12, COLS = 3, ROWS = 4;
-
+        static const char *KEYS[12] = { "1","2","3","4","5","6","7","8","9",".","0","Delete" };
+        const int KW = 280, KH = 92, KG = 20;
         for (int i = 0; i < 12; i++) {
-            int row = i / COLS, col = i % COLS;
-            int kx = rx + col * (KW + KGAP);
-            int ky = ry + row * (KH + KGAP);
-            draw_button(r, kx, ky, KW, KH, KEYS[i], (focus == i + 1), true);
+            int kx = M + (i % 3) * (KW + KG), ky = y + (i / 3) * (KH + KG);
+            big_button(r, kx, ky, KW, KH, KEYS[i], focus == i + 1, true, false);
         }
-
-        int kpad_h = ROWS * KH + (ROWS - 1) * KGAP;
-        int done_y = ry + kpad_h + 16;
-        int done_w = COLS * KW + (COLS - 1) * KGAP;
-        draw_button(r, rx, done_y, done_w, KH, "Done", (focus == 15), true);
-
+        big_button(r, M, y + 4 * (KH + KG), 3 * KW + 2 * KG, KH, "Done", focus == 15, true, true);
     } else {
-        /* ── Main action buttons ────────────────────────────────────────── */
-        int btn_h = 80;
-        int btn_w = (rw - 20) / 2;
-
-        draw_button(r, rx,              ry, btn_w, btn_h, "Import Config", focus == 13, can_import);
-        draw_button(r, rx + btn_w + 20, ry, btn_w, btn_h, "Connect",       focus == 14, can_connect);
-        ry += btn_h + 16;
-
-        /* Settings — full width */
-        {
-            int half = (rw - 20) / 2;
-            draw_button(r, rx, ry, half, 60, "Settings", focus == 16, true);
-            draw_button(r, rx + half + 20, ry, half, 60, "Controller test", focus == 17, true);
-        }
-        ry += 60 + 36;
-
-        /* Contextual guidance */
-        if (step == 1 && !can_import) {
-            set_color(r, COL_TEXT_FAINT);
-            draw_text(r, rx, ry, "Enter a PS5 IP address above,", 2); ry += 20;
-            draw_text(r, rx, ry, "then press Import Config to load", 2); ry += 20;
-            draw_text(r, rx, ry, "your registration keys.", 2);
-        } else if (step == 1 && can_import) {
-            set_color(r, COL_TEXT_DIM);
-            draw_text(r, rx, ry, "IP looks good. If you have copied", 2); ry += 20;
-            draw_text(r, rx, ry, "chiaki-ng-Default.ini to the TV,", 2); ry += 20;
-            draw_text(r, rx, ry, "press  Import Config  to continue.", 2);
-        } else if (step == 2) {
-            set_color(r, COL_TEXT_DIM);
-            draw_text(r, rx, ry, "Keys imported. Enter the PS5 IP", 2); ry += 20;
-            draw_text(r, rx, ry, "address above, then press Connect.", 2);
+        const int BW = (LW - 24) / 2, BH = 104;
+        big_button(r, M, y, BW, BH, "Import keys", focus == 13, can_import, false);
+        big_button(r, M + BW + 24, y, BW, BH, "Connect", focus == 14, can_connect, true);
+        y += BH + 24;
+        big_button(r, M, y, BW, BH, "Settings", focus == 16, true, false);
+        big_button(r, M + BW + 24, y, BW, BH, "Controller test", focus == 17, true, false);
+        y += BH + 36;
+        if (msg && msg[0]) {
+            SDL_Color mc = C(COL_WARNING);
+            if (strstr(msg, "OK") || strstr(msg, "updated")) mc = C(COL_SUCCESS);
+            else if (strstr(msg, "ailed") || strstr(msg, "issing") || strstr(msg, "not found")) mc = C(COL_ERROR);
+            ui_text_draw_wrapped(r, M, y, LW, msg, 30, UI_FONT_SEMIBOLD, mc, 3);
         }
     }
 
-    /* ── Status message (if any) ────────────────────────────────────────── */
-    if (msg && msg[0]) {
-        int msg_y = CONTENT_Y + CONTENT_H - 56;
-        /* Pick colour based on content */
-        if (strstr(msg, "OK") || strstr(msg, "ok") || strstr(msg, "Import OK"))
-            set_color(r, COL_SUCCESS);
-        else if (strstr(msg, "failed") || strstr(msg, "MISSING") ||
-                 strstr(msg, "not found") || strstr(msg, "Missing"))
-            set_color(r, COL_ERROR);
-        else
-            set_color(r, COL_WARNING);
-
-        /* Truncate long messages to fit */
-        char trunc[72];
-        strncpy(trunc, msg, sizeof(trunc) - 1);
-        trunc[sizeof(trunc) - 1] = '\0';
-        draw_text(r, RIGHT_X + 52, msg_y, trunc, 2);
-    }
-
-    /* ── Status pills row ───────────────────────────────────────────────── */
-    int pill_y  = FOOTER_Y - 48;
-    int pill_x  = LEFT_X;
-
-    pill_x += draw_status_pill(r, pill_x, pill_y, "Keys: Ready", has_keys);
-    pill_x += draw_status_pill(r, pill_x, pill_y, ip && ip[0] ? ip : "IP: Not Set",
-                                can_import);
-    /* Note: can_connect also requires keys, so it's only true if both are set */
-    if (can_connect)
-        draw_status_pill(r, pill_x, pill_y, "Ready", true);
-
-    /* ── Footer hint bar ────────────────────────────────────────────────── */
+    /* ── Right: help for the current step + controllers ── */
     set_color(r, COL_PANEL);
-    fill_rect(r, 0, FOOTER_Y, SCREEN_W, FOOTER_H);
-    set_color(r, COL_BORDER_DIM);
-    hline(r, 0, FOOTER_Y, SCREEN_W);
-
-    set_color(r, COL_TEXT_FAINT);
-    if (show_keypad) {
-        draw_text_centered(r, SCREEN_W / 2, FOOTER_Y + (FOOTER_H - 14) / 2,
-            "ARROWS: Move keypad   OK: Type digit   RED/BACK: Close keypad", 2);
+    fill_rounded_rect(r, RX, TOP, RW, FOOT_Y - TOP - 30, 18);
+    int ry = TOP + 30, rx = RX + 40, rw = RW - 80;
+    SDL_Color tx = C(COL_TEXT), dim = C(COL_TEXT_DIM);
+    if (!has_keys) {
+        ui_text_draw(r, rx, ry, "Get started", 42, UI_FONT_BOLD, tx, UI_ALIGN_LEFT);
+        ry += 66;
+        ry += ui_text_draw_wrapped(r, rx, ry, rw,
+            "1. On your PC, register your PS5 in chiaki-ng, then use Settings > Config > "
+            "Export Settings To File to save chiaki-ng-Default.ini.", 30, UI_FONT_REGULAR, tx, 0) + 16;
+        ry += ui_text_draw_wrapped(r, rx, ry, rw,
+            "2. Copy that file to the TV (webOS Dev Manager or adb push) into:", 30,
+            UI_FONT_REGULAR, tx, 0) + 8;
+        ry += ui_text_draw_wrapped(r, rx + 20, ry, rw - 20,
+            "/media/developer/apps/usr/palm/applications/org.homebrew.chiaki/", 26,
+            UI_FONT_REGULAR, C(COL_TEXT_CODE), 0) + 16;
+        ry += ui_text_draw_wrapped(r, rx, ry, rw,
+            "3. Enter the PS5 address on the left and press Import keys.", 30,
+            UI_FONT_REGULAR, tx, 0) + 24;
+    } else if (!can_connect) {
+        ui_text_draw(r, rx, ry, "Enter the PS5 address", 42, UI_FONT_BOLD, tx, UI_ALIGN_LEFT);
+        ry += 66;
+        ry += ui_text_draw_wrapped(r, rx, ry, rw,
+            "On the PS5: Settings > Network > Connection Status > View Connection Status. "
+            "Use the IPv4 address, for example 192.168.1.50.", 30, UI_FONT_REGULAR, tx, 0) + 24;
     } else {
-        draw_text_centered(r, SCREEN_W / 2, FOOTER_Y + (FOOTER_H - 14) / 2,
-            "ARROWS: Navigate   OK: Select / Edit IP   RED: Return / Exit", 2);
+        ui_text_draw(r, rx, ry, "Ready to play", 42, UI_FONT_BOLD, tx, UI_ALIGN_LEFT);
+        ry += 66;
+        ry += ui_text_draw_wrapped(r, rx, ry, rw,
+            "Press Connect. During the stream, hold Up on the remote to show stream statistics, "
+            "and press Back to leave.", 30, UI_FONT_REGULAR, dim, 0) + 24;
     }
 
-    /* Debug key-status — very small, bottom-left corner */
-    set_color(r, COL_TEXT_FAINT);
-    draw_text(r, LEFT_X, FOOTER_Y + FOOTER_H - 12, status, 1);
+    /* controllers (live) */
+    set_color(r, COL_BORDER_DIM);
+    fill_rect(r, rx, ry, rw, 2);
+    ry += 24;
+    ui_text_draw(r, rx, ry, "Controllers", 34, UI_FONT_BOLD, tx, UI_ALIGN_LEFT);
+    ry += 54;
+    InputPadInfo pads[4];
+    int n = input ? input_get_pads(input, pads, 4) : 0;
+    if (n == 0)
+        ui_text_draw_wrapped(r, rx, ry, rw, "None connected. Turn a controller on, or plug it in by USB.",
+                             28, UI_FONT_REGULAR, C(COL_WARNING), 2);
+    for (int i = 0; i < n && i < 3 && ry < FOOT_Y - 140; i++) {
+        set_color(r, pads[i].outputs_active ? COL_SUCCESS : COL_WARNING);
+        fill_rounded_rect(r, rx, ry + 12, 14, 14, 7);
+        ui_text_draw(r, rx + 30, ry, pads[i].name, 30, UI_FONT_SEMIBOLD, tx, UI_ALIGN_LEFT);
+        ry += 40;
+        char line[160];
+        snprintf(line, sizeof(line), "%s  -  %s", pads[i].connection, pads[i].outputs);
+        ry += ui_text_draw_wrapped(r, rx + 30, ry, rw - 30, line, 26, UI_FONT_REGULAR, dim, 2) + 14;
+    }
+
+    /* ── Footer ── */
+    set_color(r, COL_PANEL);
+    fill_rect(r, 0, FOOT_Y, SCREEN_W, SCREEN_H - FOOT_Y);
+    ui_text_draw(r, SCREEN_W / 2, FOOT_Y + (SCREEN_H - FOOT_Y - ui_text_line_height(28)) / 2,
+                 show_keypad ? "Arrows: move    OK: type    Back: close keypad"
+                             : "Arrows / D-pad: move    OK / Cross: select    Back / Circle: exit",
+                 28, UI_FONT_REGULAR, dim, UI_ALIGN_CENTER);
 }
+
 
 /* ══════════════════════════════════════════════════════════════════════════
  * Settings screen
@@ -1060,15 +772,18 @@ void ui_render_stats_overlay(SDL_Renderer *r, const char *text)
 
     const int scale  = 2;
     const int pad    = 20;
-    const int line_h = 9 * scale;
+    ui_text_init(r);
+    const int line_h = ui_text_line_height(scale_px(scale));
 
-    /* Measure */
-    int lines = 1, maxw = 0, curw = 0;
-    for (const char *p = text; *p; p++) {
-        if (*p == '\n') { if (curw > maxw) maxw = curw; curw = 0; lines++; continue; }
-        curw += 6 * scale;
+    /* Measure (text_width measures up to the first '\n') */
+    int lines = 0, maxw = 0;
+    for (const char *p = text; p; ) {
+        int w = text_width(p, scale);
+        if (w > maxw) maxw = w;
+        lines++;
+        p = strchr(p, '\n');
+        if (p) p++;
     }
-    if (curw > maxw) maxw = curw;
 
     int box_w = maxw + pad * 2 + 8;  /* +8 for left accent bar */
     int box_h = lines * line_h + pad * 2;
@@ -1614,7 +1329,7 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
         }
 
         render_setup_screen(renderer, status, ip, focus, msg,
-                             has_keys, can_import, can_connect, editing);
+                             has_keys, can_import, can_connect, editing, input);
         SDL_RenderPresent(renderer);
         SDL_Delay(16);
     }
