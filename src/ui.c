@@ -459,6 +459,11 @@ static void render_setup_screen(SDL_Renderer *r, const char *status,
     set_color(r, COL_TEXT_DIM);
     draw_text(r, 36, HDR_Y + 50, "PS5 Remote Play for webOS", 2);
 
+    /* Version + build, so it is obvious which build is installed */
+    set_color(r, COL_TEXT_FAINT);
+    draw_text(r, 36 + text_width("CHIAKI", 4) + 24, HDR_Y + 24,
+              "v" APP_VERSION " (" APP_GIT ")", 2);
+
     /* Right side: connection readiness */
     if (can_connect) {
         char ps5str[80];

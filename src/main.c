@@ -171,6 +171,12 @@ static void session_event_cb(ChiakiEvent *event, void *user)
     }
 }
 
+// PS5 haptics audio (DualSense mode) → controller rumble, see input.c.
+static void haptics_frame_cb(uint8_t *buf, size_t buf_size, void *user)
+{
+    input_push_haptics((InputContext *)user, buf, buf_size);
+}
+
 // ── Signal handler ────────────────────────────────────────────────────────────
 // SIGTERM is sent by webOS when the user force-closes the app.
 // Treat it as a deliberate exit — no reconnect.
@@ -979,6 +985,7 @@ int main(int argc, char *argv[])
         char tbuf[64];
         strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S", localtime(&t));
         app_log("\n\n========== NEW LAUNCH %s ==========\n", tbuf);
+        app_log_always("[APP] chiaki-lg v%s (%s)\n", APP_VERSION, APP_GIT);
     }
 
     app_log("[APP] SS4S_MODULE=%s\n",      getenv("SS4S_MODULE"));
@@ -1290,6 +1297,12 @@ int main(int argc, char *argv[])
 
     info.video_profile.codec = requested_codec;
 
+    // Announce a DualSense to a PS5 (as chiaki-ng does).  PS5 games then send
+    // vibration as a haptics audio stream instead of classic rumble packets
+    // (which a "DualShock 4" client mostly never gets), plus trigger effects.
+    // The haptics stream is converted to motor rumble in input.c.
+    info.enable_dualsense = cfg.ps5;
+
     // ── Session / reconnect loop ──────────────────────────────────────────────
     // We stay inside this loop until the user deliberately exits (Home button,
     // SIGTERM) or the PS5 requests a clean disconnect.  On network errors we
@@ -1437,6 +1450,13 @@ int main(int argc, char *argv[])
                 (void *)audio_sink.header_cb,
                 (void *)audio_sink.frame_cb,
                 audio_sink.user);
+
+        if (info.enable_dualsense) {
+            ChiakiAudioSink haptics_sink = { 0 };
+            haptics_sink.user     = input_ctx;
+            haptics_sink.frame_cb = haptics_frame_cb;
+            chiaki_session_set_haptics_sink(&g_session, &haptics_sink);
+        }
 
         err = chiaki_session_start(&g_session);
         if (err != CHIAKI_ERR_SUCCESS)

@@ -26,6 +26,11 @@ void input_set_session(InputContext *ctx, ChiakiSession *session);
 // from chiaki's callback thread — the input thread drives the motors.
 void input_set_rumble(InputContext *ctx, uint8_t strong, uint8_t weak);
 
+// One frame of PS5 haptics audio (DualSense mode: interleaved stereo int16 PCM).
+// Converted to rumble the way chiaki-ng does for non-DualSense controllers.
+// Non-blocking; called from chiaki's audio thread.
+void input_push_haptics(InputContext *ctx, const uint8_t *buf, size_t buf_size);
+
 // Handle SDL keyboard events from the TV remote only.
 // Gamepad buttons/axes are handled internally via direct evdev + EVIOCGRAB.
 void input_handle_event(SDL_Event *ev, InputContext *ctx, ChiakiSession *session);

@@ -58,6 +58,11 @@
 // within the window → emit TOUCHPAD instead.
 #define CHORD_WINDOW_MS 100
 
+// Haptics → rumble conversion constants (from chiaki-ng gui/src/streamsession.cpp)
+#define HAPTIC_RUMBLE_MIN_STRENGTH 100
+#define HAPTIC_FRAMES_PER_TICK     3
+#define HAPTIC_TICK_MS             (HAPTIC_FRAMES_PER_TICK * 10)
+
 typedef struct {
     bool            select_held;    // physical Select is currently down
     bool            start_held;     // physical Start is currently down
@@ -96,6 +101,16 @@ struct InputContext {
     char          profile_override[32];
     bool          rumble_enabled;
     uint8_t       rumble_strong, rumble_weak;   // latest PS5 rumble request
+
+    // Haptics → rumble (PS5 DualSense mode).  One strength value per haptics
+    // frame is queued by the audio thread; the input thread averages
+    // HAPTIC_FRAMES_PER_TICK of them every HAPTIC_TICK_MS (chiaki-ng's scheme).
+    uint16_t        haptic_queue[32];
+    int             haptic_head, haptic_count;
+    uint8_t         haptic_level;               // current motor level from haptics
+    struct timespec haptic_tick;
+    unsigned long   haptic_frames;              // stats for the log
+    unsigned long   rumble_events;
 
     int             inotify_fd;          // -1 if unavailable
     bool            rescan_pending;
@@ -617,11 +632,29 @@ static void *evdev_reader(void *arg)
 
         // ── Rumble (applied here so the chiaki callback never blocks on I/O) ─
         {
+            if (ms_elapsed(&ctx->haptic_tick) >= HAPTIC_TICK_MS) {
+                get_monotonic(&ctx->haptic_tick);
+                uint32_t sum = 0;
+                for (int k = 0; k < HAPTIC_FRAMES_PER_TICK && ctx->haptic_count > 0; k++) {
+                    sum += ctx->haptic_queue[ctx->haptic_head];
+                    ctx->haptic_head = (ctx->haptic_head + 1) % 32;
+                    ctx->haptic_count--;
+                }
+                uint32_t strength = sum / HAPTIC_FRAMES_PER_TICK;   // 0..65535
+                uint8_t level = (uint8_t)(strength >> 8);
+                if (strength > 0 && level == 0) level = 1;
+                if (ctx->debug && level != ctx->haptic_level)
+                    app_log_always("[HAPTICS] level=%u (frames so far %lu)\n",
+                                   level, ctx->haptic_frames);
+                ctx->haptic_level = level;
+            }
+
             struct timespec now;
             get_monotonic(&now);
             long now_ms = now.tv_sec * 1000L + now.tv_nsec / 1000000L;
-            uint8_t s = ctx->rumble_enabled ? ctx->rumble_strong : 0;
-            uint8_t w = ctx->rumble_enabled ? ctx->rumble_weak   : 0;
+            uint8_t s = ctx->rumble_strong > ctx->haptic_level ? ctx->rumble_strong : ctx->haptic_level;
+            uint8_t w = ctx->rumble_weak   > ctx->haptic_level ? ctx->rumble_weak   : ctx->haptic_level;
+            if (!ctx->rumble_enabled) s = w = 0;
             for (int i = 0; i < MAX_GAMEPADS; i++)
                 if (ctx->pads[i].fd >= 0)
                     pad_output_rumble(&ctx->pads[i].out, s, w, now_ms);
@@ -706,8 +739,14 @@ void input_set_session(InputContext *ctx, ChiakiSession *session)
     // across a reconnect).
     if (session)
         publish_locked(ctx, session, true);
+    if (!session)
+        app_log_always("[RUMBLE] session summary: rumble events=%lu haptics frames=%lu\n",
+                       ctx->rumble_events, ctx->haptic_frames);
+    ctx->rumble_events = ctx->haptic_frames = 0;
     // No session → nothing may keep a motor running.
     ctx->rumble_strong = ctx->rumble_weak = 0;
+    ctx->haptic_count = 0;
+    ctx->haptic_level = 0;
     pthread_mutex_unlock(&ctx->state_mutex);
 }
 
@@ -717,8 +756,43 @@ void input_set_rumble(InputContext *ctx, uint8_t strong, uint8_t weak)
     pthread_mutex_lock(&ctx->state_mutex);
     if (ctx->debug && (strong != ctx->rumble_strong || weak != ctx->rumble_weak))
         app_log_always("[RUMBLE] strong=%u weak=%u\n", strong, weak);
+    ctx->rumble_events++;
     ctx->rumble_strong = strong;
     ctx->rumble_weak   = weak;
+    pthread_mutex_unlock(&ctx->state_mutex);
+}
+
+void input_push_haptics(InputContext *ctx, const uint8_t *buf, size_t buf_size)
+{
+    if (!ctx || buf_size == 0 || (buf_size % 4) != 0) return;
+
+    // Mean absolute amplitude per channel (x2), as chiaki-ng does.
+    size_t n = buf_size / 4;
+    uint32_t suml = 0, sumr = 0;
+    for (size_t i = 0; i < n; i++) {
+        int16_t l, r;
+        memcpy(&l, buf + i * 4, 2);
+        memcpy(&r, buf + i * 4 + 2, 2);
+        suml += (uint32_t)(l < 0 ? -(int32_t)l : l) * 2;
+        sumr += (uint32_t)(r < 0 ? -(int32_t)r : r) * 2;
+    }
+    uint32_t left  = suml / n, right = sumr / n;
+    if (left  <= HAPTIC_RUMBLE_MIN_STRENGTH) left = 0;
+    if (right <= HAPTIC_RUMBLE_MIN_STRENGTH) right = 0;
+    uint32_t strength = left > right ? left : right;
+    if (strength > 65535) strength = 65535;
+
+    pthread_mutex_lock(&ctx->state_mutex);
+    ctx->haptic_frames++;
+    if (strength > 0) {
+        if (strength < (1u << 9)) strength = 1u << 9;   // chiaki-ng's minimum
+        if (ctx->haptic_count == 32) {                    // drop oldest
+            ctx->haptic_head = (ctx->haptic_head + 1) % 32;
+            ctx->haptic_count--;
+        }
+        ctx->haptic_queue[(ctx->haptic_head + ctx->haptic_count) % 32] = (uint16_t)strength;
+        ctx->haptic_count++;
+    }
     pthread_mutex_unlock(&ctx->state_mutex);
 }
 
