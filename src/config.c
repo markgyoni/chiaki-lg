@@ -99,6 +99,7 @@ int config_load(AppConfig *cfg, const char *path)
     cfg->rumble           = json_get_bool(root, "rumble",           true);
     cfg->dualsense_hid    = json_get_bool(root, "dualsense_hid",    true);
     cfg->motion           = json_get_bool(root, "motion",           true);
+    cfg->trigger_effects  = json_get_bool(root, "trigger_effects",  true);
     cfg->controller_profile = json_get_str(root, "controller_profile");
     if (!cfg->controller_profile || !cfg->controller_profile[0]) {
         free(cfg->controller_profile);

@@ -134,6 +134,7 @@ Most settings are managed through the in-app Settings screen. You can also edit 
 | `rumble` | bool | `true` | Forward PS5 rumble to the controller. Works for Xbox pads over Bluetooth (raw HID) and pads whose kernel driver supports force feedback; DualSense rumble comes with the DualSense raw-HID backend. |
 | `dualsense_hid` | bool | `true` | Read a DualSense through its raw HID reports instead of the TV's generic driver. Needed for the touchpad (and later motion, rumble, adaptive triggers). Set `false` to fall back to plain buttons/sticks. |
 | `motion` | bool | `true` | Send DualSense gyro/accelerometer to the PS5 (motion aiming). Needs `dualsense_hid`. |
+| `trigger_effects` | bool | `true` | DualSense adaptive triggers. Needs `dualsense_hid`. |
 | `input_debug` | bool | `false` | Log every raw gamepad event (`[PADEV]`) and sample raw HID reports at startup. Controller capabilities (`[PAD]`/`[HID]`) are always logged. |
 
 ### PSN cloud wakeup (optional)

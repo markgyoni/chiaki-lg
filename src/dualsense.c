@@ -1,6 +1,8 @@
 #include "dualsense.h"
 
 #include <string.h>
+#include <unistd.h>
+#include <sys/types.h>
 
 #include <chiaki/controller.h>
 
@@ -221,4 +223,165 @@ void ds_motion_reset(DsMotion *m)
     chiaki_accel_new_zero_set_active(&m->accel_zero, m->last_accel[0], m->last_accel[1],
                                      m->last_accel[2], false);
     chiaki_orientation_tracker_init(&m->tracker);
+}
+
+/* ── Outputs (Stage 7) ─────────────────────────────────────────────────────── */
+/* Layout: Linux hid-playstation struct dualsense_output_report_common (47 B),
+ * same as SDL's DS5EffectsState_t:
+ *   0 valid_flag0   1 valid_flag1   2 motor_right(weak)   3 motor_left(strong)
+ *   4..7 audio      8 mute LED      9 power save
+ *   10..20 right trigger effect    21..31 left trigger effect
+ *   36 intensity reduction (hi: triggers, lo: rumble)
+ *   38 valid_flag2  41 lightbar setup  42 LED brightness  43 player LEDs  44..46 RGB */
+#define OUT_VF0_COMPAT_VIBRATION   0x01
+#define OUT_VF0_HAPTICS_SELECT     0x02
+#define OUT_VF0_RIGHT_TRIGGER      0x04
+#define OUT_VF0_LEFT_TRIGGER       0x08
+#define OUT_VF1_LIGHTBAR           0x04
+#define OUT_VF1_PLAYER_LEDS        0x10
+#define OUT_VF1_INTENSITY          0x40
+#define OUT_VF2_LIGHTBAR_SETUP     0x02
+#define OUT_VF2_COMPAT_VIBRATION2  0x04
+#define LIGHTBAR_SETUP_LIGHT_OUT   0x02
+#define TRIGGER_MODE_OFF           0x05
+
+static uint32_t crc32_update(uint32_t crc, const uint8_t *p, size_t n)
+{
+    crc = ~crc;
+    while (n--) {
+        crc ^= *p++;
+        for (int k = 0; k < 8; k++)
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+    }
+    return ~crc;
+}
+
+void ds_output_init(DsOutput *o, int fd, bool bluetooth)
+{
+    memset(o, 0, sizeof(*o));
+    o->fd = fd;
+    o->bt = bluetooth;
+    o->trig_l[0] = o->trig_r[0] = TRIGGER_MODE_OFF;
+    o->trig_dirty = true;     /* start from a known (off) trigger state */
+}
+
+void ds_output_set_rumble(DsOutput *o, uint8_t strong, uint8_t weak)
+{
+    if (strong == o->motor_strong && weak == o->motor_weak) return;
+    o->motor_strong = strong;
+    o->motor_weak = weak;
+    o->rumble_dirty = true;
+}
+
+void ds_output_set_triggers(DsOutput *o, uint8_t type_l, const uint8_t *l, uint8_t type_r, const uint8_t *r)
+{
+    uint8_t nl[11], nr[11];
+    nl[0] = type_l; memcpy(nl + 1, l, 10);
+    nr[0] = type_r; memcpy(nr + 1, r, 10);
+    if (!memcmp(nl, o->trig_l, 11) && !memcmp(nr, o->trig_r, 11)) return;
+    memcpy(o->trig_l, nl, 11);
+    memcpy(o->trig_r, nr, 11);
+    o->trig_dirty = true;
+}
+
+void ds_output_triggers_off(DsOutput *o)
+{
+    static const uint8_t zero[10] = { 0 };
+    ds_output_set_triggers(o, TRIGGER_MODE_OFF, zero, TRIGGER_MODE_OFF, zero);
+}
+
+void ds_output_set_intensity(DsOutput *o, uint8_t intensity)
+{
+    if (intensity == o->intensity) return;
+    o->intensity = intensity;
+    o->intensity_dirty = true;
+}
+
+void ds_output_set_lightbar(DsOutput *o, uint8_t r, uint8_t g, uint8_t b)
+{
+    if (o->led[0] == r && o->led[1] == g && o->led[2] == b && !o->led_dirty && o->setup_done) return;
+    o->led[0] = r; o->led[1] = g; o->led[2] = b;
+    o->led_dirty = true;
+}
+
+void ds_output_set_player(DsOutput *o, uint8_t player_index)
+{
+    /* hid-playstation's player LED patterns (5 LEDs, centre outwards). */
+    static const uint8_t pattern[] = { 0x04, 0x0a, 0x15, 0x1b, 0x1f };
+    uint8_t p = 0;
+    if (player_index >= 1 && player_index <= 5) p = pattern[player_index - 1];
+    if (p == o->player_leds && o->setup_done) return;
+    o->player_leds = p;
+    o->player_dirty = true;
+}
+
+bool ds_output_flush(DsOutput *o)
+{
+    bool setup = !o->setup_done;
+    if (!setup && !o->rumble_dirty && !o->trig_dirty && !o->intensity_dirty &&
+        !o->led_dirty && !o->player_dirty)
+        return true;
+
+    uint8_t rep[78];
+    memset(rep, 0, sizeof(rep));
+    uint8_t *c;
+    size_t size;
+    if (o->bt) {
+        rep[0] = 0x31;
+        rep[1] = (uint8_t)(o->seq << 4);     /* seq_tag */
+        rep[2] = 0x10;                       /* DS_OUTPUT_TAG */
+        o->seq = (o->seq + 1) & 0x0f;
+        c = rep + 3;
+        size = 78;
+    } else {
+        rep[0] = 0x02;
+        c = rep + 1;
+        size = 63 < sizeof(rep) ? 63 : sizeof(rep);
+    }
+
+    if (o->rumble_dirty) {
+        c[0]  |= OUT_VF0_COMPAT_VIBRATION | OUT_VF0_HAPTICS_SELECT;
+        c[38] |= OUT_VF2_COMPAT_VIBRATION2;   /* newer firmware */
+        c[2] = o->motor_weak;
+        c[3] = o->motor_strong;
+    }
+    if (o->trig_dirty) {
+        c[0] |= OUT_VF0_RIGHT_TRIGGER | OUT_VF0_LEFT_TRIGGER;
+        memcpy(c + 10, o->trig_r, 11);
+        memcpy(c + 21, o->trig_l, 11);
+    }
+    if (o->trig_dirty || o->rumble_dirty || o->intensity_dirty) {
+        c[1] |= OUT_VF1_INTENSITY;
+        c[36] = o->intensity;
+    }
+    if (setup) {
+        /* Fade out the firmware's connect animation so the lightbar obeys us. */
+        c[38] |= OUT_VF2_LIGHTBAR_SETUP;
+        c[41] = LIGHTBAR_SETUP_LIGHT_OUT;
+    }
+    if (o->led_dirty || setup) {
+        c[1] |= OUT_VF1_LIGHTBAR;
+        c[44] = o->led[0]; c[45] = o->led[1]; c[46] = o->led[2];
+    }
+    if (o->player_dirty || setup) {
+        c[1] |= OUT_VF1_PLAYER_LEDS;
+        c[43] = o->player_leds;
+    }
+
+    if (o->bt) {
+        uint8_t seed = 0xa2;
+        uint32_t crc = crc32_update(0, &seed, 1);
+        crc = crc32_update(crc ^ 0, rep, size - 4);
+        rep[size - 4] = (uint8_t)crc;
+        rep[size - 3] = (uint8_t)(crc >> 8);
+        rep[size - 2] = (uint8_t)(crc >> 16);
+        rep[size - 1] = (uint8_t)(crc >> 24);
+    }
+
+    ssize_t w = write(o->fd, rep, size);
+    if (w != (ssize_t)size)
+        return false;
+    o->setup_done = true;
+    o->rumble_dirty = o->trig_dirty = o->intensity_dirty = o->led_dirty = o->player_dirty = false;
+    return true;
 }

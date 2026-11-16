@@ -83,3 +83,31 @@ void ds_motion_init(DsMotion *m, const DsCalib *cal);
 void ds_motion_update(DsMotion *m, const DsInputState *s, ChiakiControllerState *st);
 /* CHIAKI_EVENT_MOTION_RESET: re-zero orientation around the current pose. */
 void ds_motion_reset(DsMotion *m);
+
+/* ── Outputs (Stage 7): rumble, adaptive triggers, lightbar, player LEDs ──── */
+
+typedef struct {
+    int      fd;            /* hidraw, borrowed */
+    bool     bt;            /* Bluetooth: report 0x31 + CRC32; USB: report 0x02 */
+    uint8_t  seq;
+
+    bool     setup_done;    /* lightbar fade-out sent (takes over from firmware) */
+
+    uint8_t  motor_strong, motor_weak;      bool rumble_dirty;
+    uint8_t  trig_l[11], trig_r[11];        bool trig_dirty;   /* [0] mode, [1..10] params */
+    uint8_t  intensity;                     bool intensity_dirty; /* hi nibble trigger, lo nibble rumble reduction */
+    uint8_t  led[3];                        bool led_dirty;
+    uint8_t  player_leds;                   bool player_dirty;
+} DsOutput;
+
+void ds_output_init(DsOutput *o, int fd, bool bluetooth);
+void ds_output_set_rumble(DsOutput *o, uint8_t strong, uint8_t weak);
+/* type/params as in ChiakiTriggerEffectsEvent (DualSense effect mode + 10 bytes). */
+void ds_output_set_triggers(DsOutput *o, uint8_t type_l, const uint8_t *l, uint8_t type_r, const uint8_t *r);
+void ds_output_triggers_off(DsOutput *o);
+void ds_output_set_intensity(DsOutput *o, uint8_t intensity);
+void ds_output_set_lightbar(DsOutput *o, uint8_t r, uint8_t g, uint8_t b);
+void ds_output_set_player(DsOutput *o, uint8_t player_index);
+/* Send one output report carrying everything that changed.  Returns false if
+ * the write failed. */
+bool ds_output_flush(DsOutput *o);

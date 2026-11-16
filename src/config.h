@@ -28,6 +28,7 @@ typedef struct {
     bool     rumble;            // forward PS5 rumble to controllers
     bool     dualsense_hid;     // read DualSense via raw HID (touchpad, motion)
     bool     motion;            // forward DualSense gyro/accel to the PS5
+    bool     trigger_effects;   // DualSense adaptive triggers
     char    *controller_profile; // "auto" or a pad_profile id (sony_generic, xbox_bt, ...)
 } AppConfig;
 

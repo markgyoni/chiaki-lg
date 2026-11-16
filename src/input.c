@@ -103,6 +103,9 @@ typedef struct {
     uint8_t      touch_did[2];  // DualSense contact id for that slot
     struct timespec ds_log_ts;
     DsMotion     motion;        // gyro/accel → chiaki motion + orientation (Stage 6)
+    DsOutput     dsout;         // rumble/triggers/lightbar (Stage 7)
+    bool         dsout_active;
+    bool         dsout_failed_logged;
 } GamepadDev;
 
 struct InputContext {
@@ -131,6 +134,17 @@ struct InputContext {
     struct timespec haptic_tick;
     unsigned long   haptic_frames;              // stats for the log
     unsigned long   rumble_events;
+
+    // DualSense outputs requested by the PS5 (Stage 7).  Kept here so a pad
+    // that connects mid-session gets the current state.
+    bool            trigger_effects_enabled;    // config "trigger_effects"
+    bool            trig_valid;
+    uint8_t         trig_type_l, trig_type_r, trig_l[10], trig_r[10];
+    bool            trig_intensity_off;         // PS5 setting: trigger effects off
+    uint8_t         ds_intensity;               // hi nibble trigger, lo nibble rumble reduction
+    float           rumble_multiplier;          // PS5 vibration intensity for non-DualSense pads
+    uint8_t         led[3];
+    uint8_t         player_index;
 
     int             inotify_fd;          // -1 if unavailable
     bool            rescan_pending;
@@ -484,6 +498,19 @@ static void try_open_pad_locked(InputContext *ctx, const char *path)
                                   : r < 0 ? strerror(feat_errno) : "unparsable");
             if (!cal_ok)
                 app_log_always("[INPUT]   motion: nominal scale + auto gyro bias (hold the pad still ~1 s)\n");
+
+            // Outputs over the same hidraw node; start from the session's current state.
+            ds_output_init(&pad->dsout, pad->hid_fd, id.bustype == 0x05 /* BUS_BLUETOOTH */);
+            ds_output_set_lightbar(&pad->dsout, ctx->led[0], ctx->led[1], ctx->led[2]);
+            ds_output_set_player(&pad->dsout, ctx->player_index);
+            ds_output_set_intensity(&pad->dsout, ctx->ds_intensity);
+            if (ctx->trig_valid && ctx->trigger_effects_enabled && !ctx->trig_intensity_off)
+                ds_output_set_triggers(&pad->dsout, ctx->trig_type_l, ctx->trig_l,
+                                       ctx->trig_type_r, ctx->trig_r);
+            pad->dsout_active = true;
+            app_log_always("[INPUT]   DualSense outputs: rumble, adaptive triggers%s, lightbar, player LEDs (%s)\n",
+                           ctx->trigger_effects_enabled ? "" : " (disabled)",
+                           id.bustype == 0x05 ? "BT report 0x31" : "USB report 0x02");
         } else {
             app_log_always("[INPUT]   DualSense raw HID unavailable (%s) — using evdev\n",
                            strerror(errno));
@@ -507,6 +534,13 @@ static void close_pad_locked(InputContext *ctx, int i, const char *why)
     if (pad->fd < 0) return;
     app_log_always("[INPUT] Gamepad \"%s\" (%s) removed: %s\n", pad->name, pad->path, why);
     pad_output_close(&pad->out);
+    if (pad->dsout_active) {
+        // Best effort (the pad may already be gone): motors and triggers off.
+        ds_output_set_rumble(&pad->dsout, 0, 0);
+        ds_output_triggers_off(&pad->dsout);
+        ds_output_flush(&pad->dsout);
+        pad->dsout_active = false;
+    }
     if (pad->hid_fd >= 0) close(pad->hid_fd);
     pad->hid_fd = -1;
     ioctl(pad->fd, EVIOCGRAB, 0);
@@ -833,9 +867,24 @@ static void *evdev_reader(void *arg)
             uint8_t s = ctx->rumble_strong > ctx->haptic_level ? ctx->rumble_strong : ctx->haptic_level;
             uint8_t w = ctx->rumble_weak   > ctx->haptic_level ? ctx->rumble_weak   : ctx->haptic_level;
             if (!ctx->rumble_enabled) s = w = 0;
-            for (int i = 0; i < MAX_GAMEPADS; i++)
-                if (ctx->pads[i].fd >= 0)
-                    pad_output_rumble(&ctx->pads[i].out, s, w, now_ms);
+            // Non-DualSense pads: apply the PS5's vibration-intensity setting
+            // ourselves; a DualSense gets it as a reduction byte in its report.
+            uint8_t ms = (uint8_t)(s * ctx->rumble_multiplier);
+            uint8_t mw = (uint8_t)(w * ctx->rumble_multiplier);
+            for (int i = 0; i < MAX_GAMEPADS; i++) {
+                GamepadDev *pad = &ctx->pads[i];
+                if (pad->fd < 0) continue;
+                if (pad->dsout_active) {
+                    ds_output_set_rumble(&pad->dsout, s, w);
+                    if (!ds_output_flush(&pad->dsout) && !pad->dsout_failed_logged) {
+                        pad->dsout_failed_logged = true;
+                        app_log_always("[INPUT] %s: DualSense output report write failed: %s\n",
+                                       pad->path, strerror(errno));
+                    }
+                } else {
+                    pad_output_rumble(&pad->out, ms, mw, now_ms);
+                }
+            }
         }
 
         pthread_mutex_unlock(&ctx->state_mutex);
@@ -881,6 +930,9 @@ InputContext *input_init(const InputOptions *opt)
     ctx->rumble_enabled = opt->rumble;
     ctx->dualsense_hid  = opt->dualsense_hid;
     ctx->motion_enabled = opt->motion;
+    ctx->trigger_effects_enabled = opt->trigger_effects;
+    ctx->rumble_multiplier = 1.0f;
+    ctx->led[2] = 0x40;          // dim blue until the PS5 sends its colour
     for (int i = 0; i < MAX_GAMEPADS; i++) ctx->pads[i].fd = -1;
     snprintf(ctx->profile_override, sizeof(ctx->profile_override), "%s",
              (opt->profile_override && opt->profile_override[0]) ? opt->profile_override : "auto");
@@ -923,8 +975,16 @@ void input_set_session(InputContext *ctx, ChiakiSession *session)
         app_log_always("[RUMBLE] session summary: rumble events=%lu haptics frames=%lu\n",
                        ctx->rumble_events, ctx->haptic_frames);
     ctx->rumble_events = ctx->haptic_frames = 0;
-    // No session → nothing may keep a motor running.
+    // No session → nothing may keep a motor running or a trigger stiff.
     ctx->rumble_strong = ctx->rumble_weak = 0;
+    ctx->trig_valid = false;
+    for (int i = 0; i < MAX_GAMEPADS; i++) {
+        if (ctx->pads[i].fd >= 0 && ctx->pads[i].dsout_active) {
+            ds_output_set_rumble(&ctx->pads[i].dsout, 0, 0);
+            ds_output_triggers_off(&ctx->pads[i].dsout);
+            ds_output_flush(&ctx->pads[i].dsout);
+        }
+    }
     ctx->haptic_count = 0;
     ctx->haptic_level = 0;
     pthread_mutex_unlock(&ctx->state_mutex);
@@ -940,6 +1000,80 @@ void input_set_rumble(InputContext *ctx, uint8_t strong, uint8_t weak)
     ctx->rumble_strong = strong;
     ctx->rumble_weak   = weak;
     pthread_mutex_unlock(&ctx->state_mutex);
+}
+
+// Apply the stored trigger state to every DualSense.  Caller holds state_mutex.
+static void apply_triggers_locked(InputContext *ctx)
+{
+    for (int i = 0; i < MAX_GAMEPADS; i++) {
+        GamepadDev *pad = &ctx->pads[i];
+        if (pad->fd < 0 || !pad->dsout_active) continue;
+        if (ctx->trig_valid && ctx->trigger_effects_enabled && !ctx->trig_intensity_off)
+            ds_output_set_triggers(&pad->dsout, ctx->trig_type_l, ctx->trig_l,
+                                   ctx->trig_type_r, ctx->trig_r);
+        else
+            ds_output_triggers_off(&pad->dsout);
+        ds_output_set_intensity(&pad->dsout, ctx->ds_intensity);
+    }
+}
+
+void input_set_trigger_effects(InputContext *ctx, uint8_t type_l, const uint8_t l[10],
+                               uint8_t type_r, const uint8_t r[10])
+{
+    if (!ctx) return;
+    pthread_mutex_lock(&ctx->state_mutex);
+    ctx->trig_valid = true;
+    ctx->trig_type_l = type_l; memcpy(ctx->trig_l, l, 10);
+    ctx->trig_type_r = type_r; memcpy(ctx->trig_r, r, 10);
+    if (ctx->debug)
+        app_log_always("[TRIGGERS] L mode=0x%02x %02x %02x %02x %02x  R mode=0x%02x %02x %02x %02x %02x\n",
+                       type_l, l[0], l[1], l[2], l[3], type_r, r[0], r[1], r[2], r[3]);
+    apply_triggers_locked(ctx);
+    pthread_mutex_unlock(&ctx->state_mutex);
+}
+
+void input_set_lightbar(InputContext *ctx, uint8_t r, uint8_t g, uint8_t b)
+{
+    if (!ctx) return;
+    pthread_mutex_lock(&ctx->state_mutex);
+    ctx->led[0] = r; ctx->led[1] = g; ctx->led[2] = b;
+    for (int i = 0; i < MAX_GAMEPADS; i++)
+        if (ctx->pads[i].fd >= 0 && ctx->pads[i].dsout_active)
+            ds_output_set_lightbar(&ctx->pads[i].dsout, r, g, b);
+    pthread_mutex_unlock(&ctx->state_mutex);
+    app_log_always("[INPUT] lightbar colour from PS5: %02x%02x%02x\n", r, g, b);
+}
+
+void input_set_player_index(InputContext *ctx, uint8_t index)
+{
+    if (!ctx) return;
+    pthread_mutex_lock(&ctx->state_mutex);
+    ctx->player_index = index;
+    for (int i = 0; i < MAX_GAMEPADS; i++)
+        if (ctx->pads[i].fd >= 0 && ctx->pads[i].dsout_active)
+            ds_output_set_player(&ctx->pads[i].dsout, index);
+    pthread_mutex_unlock(&ctx->state_mutex);
+    app_log_always("[INPUT] player index from PS5: %u\n", index);
+}
+
+// PS5 accessibility settings for vibration / trigger effect strength.
+// level: chiaki's ChiakiDualSenseEffectIntensity (0 Off, 1 Strong, 2 Medium, 3 Weak).
+void input_set_effect_intensity(InputContext *ctx, bool triggers, int level)
+{
+    if (!ctx) return;
+    pthread_mutex_lock(&ctx->state_mutex);
+    uint8_t hi = ctx->ds_intensity & 0xf0, lo = ctx->ds_intensity & 0x0f;
+    if (triggers) {
+        ctx->trig_intensity_off = (level == 0);
+        hi = level == 0 ? 0xf0 : level == 2 ? 0x60 : level == 3 ? 0x90 : 0x00;
+    } else {
+        lo = level == 0 ? 0x0f : level == 2 ? 0x02 : level == 3 ? 0x03 : 0x00;
+        ctx->rumble_multiplier = level == 0 ? 0.0f : level == 2 ? 0.5f : level == 3 ? 0.33f : 1.0f;
+    }
+    ctx->ds_intensity = hi | lo;
+    apply_triggers_locked(ctx);
+    pthread_mutex_unlock(&ctx->state_mutex);
+    app_log_always("[INPUT] %s intensity from PS5: %d\n", triggers ? "trigger" : "vibration", level);
 }
 
 void input_motion_reset(InputContext *ctx)
@@ -995,6 +1129,11 @@ void input_fini(InputContext *ctx)
     for (int i = 0; i < MAX_GAMEPADS; i++) {
         if (ctx->pads[i].fd >= 0) {
             pad_output_close(&ctx->pads[i].out);
+            if (ctx->pads[i].dsout_active) {
+                ds_output_set_rumble(&ctx->pads[i].dsout, 0, 0);
+                ds_output_triggers_off(&ctx->pads[i].dsout);
+                ds_output_flush(&ctx->pads[i].dsout);
+            }
             if (ctx->pads[i].hid_fd >= 0) close(ctx->pads[i].hid_fd);
             ioctl(ctx->pads[i].fd, EVIOCGRAB, 0);
             close(ctx->pads[i].fd);
