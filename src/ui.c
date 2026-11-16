@@ -724,18 +724,54 @@ static void render_setup_screen(SDL_Renderer *r, const char *status,
  * ══════════════════════════════════════════════════════════════════════════ */
 
 typedef enum {
-    SET_RESOLUTION = 0,   /* VIDEO group */
+    /* left column */
+    SET_RESOLUTION = 0,   /* VIDEO */
     SET_FPS,
     SET_BITRATE,
     SET_CODEC,
-    SET_PS5,              /* SESSION group — must match render order below */
+    SET_PS5,              /* CONNECTION */
     SET_WAKE_ON_START,
     SET_SLEEP_ON_EXIT,
-    SET_HW_DECODER,       /* DEVELOPER group */
-    SET_LOG_LEVEL,
+    SET_LOG_LEVEL,        /* ADVANCED */
+    SET_INPUT_DEBUG,
+    /* right column */
+    SET_PROFILE,          /* CONTROLLERS */
+    SET_RUMBLE,
+    SET_DS_HID,
+    SET_MOTION,
+    SET_TRIGGERS,
+    SET_BT_PATCH,
     SET_RETURN,
     SET_COUNT
 } SettingsFocus;
+
+#define SET_FIRST_RIGHT SET_PROFILE
+
+static const char *PROFILE_OPTIONS[] = {"auto", "sony_generic", "sony_kernel", "xbox_bt", "xpad", "generic"};
+static const char *PROFILE_LABELS[]  = {"Automatic", "PlayStation (HID)", "PlayStation (kernel)",
+                                        "Xbox (Bluetooth)", "Xbox (USB)", "Generic"};
+#define N_PROFILES ((int)(sizeof(PROFILE_OPTIONS) / sizeof(PROFILE_OPTIONS[0])))
+
+/* One line of help per setting, shown under the list for the focused row. */
+static const char *SETTING_HELP[SET_COUNT] = {
+    [SET_RESOLUTION]    = "Stream resolution. 1080p suits most TVs; 2160p needs a fast network.",
+    [SET_FPS]           = "60 fps feels much smoother; 30 fps uses half the bandwidth.",
+    [SET_BITRATE]       = "Higher looks sharper but needs a stronger network. Lower it if the picture stutters.",
+    [SET_CODEC]         = "H.265 gives better quality per bit. Use H.265 HDR for HDR games on an HDR TV.",
+    [SET_PS5]           = "On for a PS5, off for a PS4 (PS4 streams always use H.264).",
+    [SET_WAKE_ON_START] = "Wake the console from rest mode when you press Connect.",
+    [SET_SLEEP_ON_EXIT] = "Put the console into rest mode when you leave the stream.",
+    [SET_LOG_LEVEL]     = "How much is written to /tmp/chiaki.log. Warning is enough unless you are debugging.",
+    [SET_INPUT_DEBUG]   = "Log every raw controller event. Only for diagnosing controller problems.",
+    [SET_PROFILE]       = "Button layout. Automatic picks the right one for each controller.",
+    [SET_RUMBLE]        = "Pass vibration from games to your controller.",
+    [SET_DS_HID]        = "Read the DualSense directly: touchpad, motion, adaptive triggers, lightbar.",
+    [SET_MOTION]        = "Send DualSense gyro and accelerometer to the console (motion aiming).",
+    [SET_TRIGGERS]      = "DualSense adaptive trigger resistance from games.",
+    [SET_BT_PATCH]      = "Rooted TVs: fix the TV's Bluetooth so DualSense vibration, triggers and lightbar "
+                          "work wirelessly. Nothing is changed on disk; a reboot undoes it.",
+    [SET_RETURN]        = "Go back to the start screen.",
+};
 
 typedef struct { int w, h; const char *label; } ResOption;
 
@@ -833,7 +869,7 @@ static void ui_draw_option_row(SDL_Renderer *r, int x, int y, int w, int h,
         draw_rect_outline(r, x, y, w, h);
     }
 
-    int scale = 2;
+    int scale = 3;
     int ty = y + (h - 7 * scale) / 2;
 
     set_color(r, focused ? COL_TEXT : COL_TEXT_DIM);
@@ -855,21 +891,19 @@ static void ui_draw_option_row(SDL_Renderer *r, int x, int y, int w, int h,
     }
 }
 
+static const char *on_off(bool v) { return v ? "On" : "Off"; }
+
 static void ui_render_settings_screen(SDL_Renderer *r,
                                       const AppConfig *cfg,
                                       int focus,
                                       const char *msg,
                                       int res_idx, int fps_idx,
                                       int br_idx,  int codec_idx,
-                                      int log_idx)
+                                      int log_idx, int profile_idx)
 {
-    /* Background */
+    /* Background + header */
     set_color(r, COL_BG);
     fill_rect(r, 0, 0, SCREEN_W, SCREEN_H);
-    set_color(r, COL_BG_DEEPER);
-    fill_rect(r, 0, 0, SCREEN_W, 60);
-
-    /* Header */
     set_color(r, COL_PANEL);
     fill_rect(r, 0, HDR_Y, SCREEN_W, HDR_H);
     set_color(r, COL_BORDER_DIM);
@@ -877,102 +911,80 @@ static void ui_render_settings_screen(SDL_Renderer *r,
     set_color(r, COL_ACCENT);
     fill_rect(r, 0, HDR_Y, 8, HDR_H);
     set_color(r, COL_TEXT);
-    draw_text(r, 36, HDR_Y + 10, "CHIAKI", 4);
+    draw_text(r, 36, HDR_Y + 18, "Settings", 4);
     set_color(r, COL_TEXT_DIM);
-    draw_text(r, 36, HDR_Y + 50, "Settings", 2);
+    draw_text(r, SCREEN_W - 48 - text_width("Saved automatically", 2), HDR_Y + 30,
+              "Saved automatically", 2);
 
-    /* Content area (single card, centred) */
-    const int CX    = 200;
-    const int CY    = CONTENT_Y;
-    const int CW    = SCREEN_W - 400;
-    const int CH    = CONTENT_H;
-
-    set_color(r, COL_PANEL);
-    fill_rounded_rect(r, CX, CY, CW, CH, 14);
-    set_color(r, COL_ACCENT);
-    fill_rect(r, CX, CY, 6, CH);
-
-    /* Section header */
-    int rx = CX + 36, ry = CY + 22, rw = CW - 72;
-    set_color(r, COL_TEXT);
-    draw_text(r, rx, ry, "Streaming Options", 3);
-    set_color(r, COL_TEXT_FAINT);
-    draw_text(r, rx + CW - 72 - text_width("Saved to config.json", 2),
-              ry + 4, "Saved to config.json", 2);
-    ry += 38;
-    set_color(r, COL_BORDER_DIM);
-    hline(r, rx, ry, rw);
-    ry += 10;
-
-    const int ROW_H   = 44;
-    const int ROW_GAP = 6;
+    /* Two columns of rows */
+    const int ROW_H = 58, ROW_GAP = 8, GROUP_GAP = 18;
+    const int COL_W = (SCREEN_W - 60 * 2 - 40) / 2;
+    const int LX = 60, RX = LX + COL_W + 40;
     char vbuf[64];
 
-    /* Group: Video */
-    set_color(r, COL_TEXT_FAINT);
-    draw_text(r, rx, ry, "VIDEO", 2); ry += 20;
+#define GROUP(x, y, name) do { set_color(r, COL_ACCENT); draw_text(r, (x) + 4, (y), name, 2); (y) += 34; } while (0)
+#define ROW(x, y, id, label, value) do { \
+        ui_draw_option_row(r, (x), (y), COL_W, ROW_H, label, value, focus == (id)); \
+        (y) += ROW_H + ROW_GAP; } while (0)
 
+    int y = CONTENT_Y + 6;
+    GROUP(LX, y, "VIDEO");
     snprintf(vbuf, sizeof(vbuf), "%s  (%dx%d)",
              RES_OPTIONS[res_idx].label, RES_OPTIONS[res_idx].w, RES_OPTIONS[res_idx].h);
-    ui_draw_option_row(r, rx, ry, rw, ROW_H, "Resolution", vbuf, focus == SET_RESOLUTION);
-    ry += ROW_H + ROW_GAP;
-
+    ROW(LX, y, SET_RESOLUTION, "Resolution", vbuf);
     snprintf(vbuf, sizeof(vbuf), "%d fps", FPS_OPTIONS[fps_idx]);
-    ui_draw_option_row(r, rx, ry, rw, ROW_H, "Frame Rate", vbuf, focus == SET_FPS);
-    ry += ROW_H + ROW_GAP;
+    ROW(LX, y, SET_FPS, "Frame rate", vbuf);
+    snprintf(vbuf, sizeof(vbuf), "%d Mbit/s", BITRATE_OPTIONS[br_idx] / 1000);
+    ROW(LX, y, SET_BITRATE, "Bitrate", vbuf);
+    ROW(LX, y, SET_CODEC, "Codec", CODEC_LABELS[codec_idx]);
+    y += GROUP_GAP;
+    GROUP(LX, y, "CONNECTION");
+    ROW(LX, y, SET_PS5, "PS5 console", on_off(cfg && cfg->ps5));
+    ROW(LX, y, SET_WAKE_ON_START, "Wake console on connect", on_off(cfg && cfg->wakeup));
+    ROW(LX, y, SET_SLEEP_ON_EXIT, "Rest mode on exit", on_off(cfg && cfg->sleep_on_exit));
+    y += GROUP_GAP;
+    GROUP(LX, y, "ADVANCED");
+    ROW(LX, y, SET_LOG_LEVEL, "Log level", LOG_LEVEL_LABELS[log_idx]);
+    ROW(LX, y, SET_INPUT_DEBUG, "Controller debug log", on_off(cfg && cfg->input_debug));
 
-    snprintf(vbuf, sizeof(vbuf), "%d kbps", BITRATE_OPTIONS[br_idx]);
-    ui_draw_option_row(r, rx, ry, rw, ROW_H, "Bitrate", vbuf, focus == SET_BITRATE);
-    ry += ROW_H + ROW_GAP;
+    y = CONTENT_Y + 6;
+    GROUP(RX, y, "CONTROLLERS");
+    ROW(RX, y, SET_PROFILE, "Button layout", PROFILE_LABELS[profile_idx]);
+    ROW(RX, y, SET_RUMBLE, "Vibration", on_off(cfg && cfg->rumble));
+    ROW(RX, y, SET_DS_HID, "DualSense enhanced", on_off(cfg && cfg->dualsense_hid));
+    ROW(RX, y, SET_MOTION, "Motion controls", on_off(cfg && cfg->motion));
+    ROW(RX, y, SET_TRIGGERS, "Adaptive triggers", on_off(cfg && cfg->trigger_effects));
+    ROW(RX, y, SET_BT_PATCH, "Bluetooth fix (DualSense)", on_off(cfg && cfg->dualsense_bt_patch));
+    y += GROUP_GAP;
+    draw_button(r, RX, y, COL_W, ROW_H + 6, "Back", focus == SET_RETURN, true);
+#undef ROW
+#undef GROUP
 
-    ui_draw_option_row(r, rx, ry, rw, ROW_H, "Codec", CODEC_LABELS[codec_idx], focus == SET_CODEC);
-    ry += ROW_H + ROW_GAP + 4;
-
-    /* Group: Session */
-    set_color(r, COL_TEXT_FAINT);
-    draw_text(r, rx, ry, "SESSION", 2); ry += 20;
-
-    ui_draw_option_row(r, rx, ry, rw, ROW_H, "PS5 Mode",
-                       (cfg && cfg->ps5) ? "On" : "Off", focus == SET_PS5);
-    ry += ROW_H + ROW_GAP;
-
-    ui_draw_option_row(r, rx, ry, rw, ROW_H, "Wake on Start",
-                       (cfg && cfg->wakeup) ? "On" : "Off", focus == SET_WAKE_ON_START);
-    ry += ROW_H + ROW_GAP;
-
-    ui_draw_option_row(r, rx, ry, rw, ROW_H, "Sleep on Exit",
-                       (cfg && cfg->sleep_on_exit) ? "On" : "Off", focus == SET_SLEEP_ON_EXIT);
-    ry += ROW_H + ROW_GAP + 4;
-
-    /* Group: Developer */
-    set_color(r, COL_TEXT_FAINT);
-    draw_text(r, rx, ry, "DEVELOPER", 2); ry += 20;
-
-    ui_draw_option_row(r, rx, ry, rw, ROW_H, "HW Decoder (unused)",
-                       (cfg && cfg->hw_decode) ? "On" : "Off", focus == SET_HW_DECODER);
-    ry += ROW_H + ROW_GAP;
-
-    ui_draw_option_row(r, rx, ry, rw, ROW_H, "Log Level",
-                       LOG_LEVEL_LABELS[log_idx], focus == SET_LOG_LEVEL);
-    ry += ROW_H + ROW_GAP + 8;
-
-    /* Return button */
-    draw_button(r, rx, ry, rw, 50, "Return", focus == SET_RETURN, true);
-
-    /* Message (below card, above footer) */
-    if (msg && msg[0]) {
-        set_color(r, COL_TEXT_DIM);
-        draw_text_centered(r, SCREEN_W / 2, CY + CH + 10, msg, 2);
+    /* Help for the focused row */
+    const int FOOT_Y = SCREEN_H - 70, FOOT_H = 70;
+    int help_y = FOOT_Y - 116;
+    set_color(r, COL_PANEL);
+    fill_rounded_rect(r, LX, help_y, SCREEN_W - 2 * LX, 100, 12);
+    set_color(r, COL_ACCENT);
+    fill_rect(r, LX, help_y + 10, 4, 80);
+    if (focus >= 0 && focus < SET_COUNT && SETTING_HELP[focus]) {
+        SDL_Color c = { 0xec, 0xf2, 0xff, 0xff };
+        ui_text_draw_wrapped(r, LX + 28, help_y + 14, SCREEN_W - 2 * LX - 56, SETTING_HELP[focus],
+                             30, UI_FONT_REGULAR, c, 2);
     }
 
     /* Footer */
     set_color(r, COL_PANEL);
-    fill_rect(r, 0, FOOTER_Y, SCREEN_W, FOOTER_H);
+    fill_rect(r, 0, FOOT_Y, SCREEN_W, FOOT_H);
     set_color(r, COL_BORDER_DIM);
-    hline(r, 0, FOOTER_Y, SCREEN_W);
-    set_color(r, COL_TEXT_FAINT);
-    draw_text_centered(r, SCREEN_W / 2, FOOTER_Y + (FOOTER_H - 14) / 2,
-        "UP/DOWN: Navigate   LEFT/RIGHT: Change value   RED: Return", 2);
+    hline(r, 0, FOOT_Y, SCREEN_W);
+    set_color(r, COL_TEXT_DIM);
+    draw_text(r, 48, FOOT_Y + (FOOT_H - 14) / 2,
+              "Up/Down: move   Left/Right/OK: change   Back: return", 2);
+    if (msg && msg[0]) {
+        set_color(r, COL_SUCCESS);
+        draw_text(r, SCREEN_W - 48 - text_width(msg, 2), FOOT_Y + (FOOT_H - 14) / 2, msg, 2);
+    }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -1184,6 +1196,13 @@ static bool ui_write_settings_json(const char *config_path, const AppConfig *cfg
     SET_BOOL("sleep_on_exit", cfg->sleep_on_exit);
     SET_STR ("video_codec",   (cfg->video_codec && cfg->video_codec[0]) ? cfg->video_codec : "h265");
     SET_STR ("log_level",     ui_log_level_to_string(cfg->log_level));
+    SET_STR ("controller_profile", (cfg->controller_profile && cfg->controller_profile[0]) ? cfg->controller_profile : "auto");
+    SET_BOOL("rumble",             cfg->rumble);
+    SET_BOOL("dualsense_hid",      cfg->dualsense_hid);
+    SET_BOOL("motion",             cfg->motion);
+    SET_BOOL("trigger_effects",    cfg->trigger_effects);
+    SET_BOOL("dualsense_bt_patch", cfg->dualsense_bt_patch);
+    SET_BOOL("input_debug",        cfg->input_debug);
 
 #undef SET_INT
 #undef SET_BOOL
@@ -1256,7 +1275,11 @@ static void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg,
     int br_idx    = ui_find_bitrate_idx(cfg);
     int codec_idx = ui_find_codec_idx(cfg);
     int log_idx   = ui_find_log_level_idx(cfg);
+    int profile_idx = 0;
+    for (int i = 0; i < N_PROFILES; i++)
+        if (cfg->controller_profile && !strcmp(cfg->controller_profile, PROFILE_OPTIONS[i])) profile_idx = i;
     int focus     = SET_RESOLUTION;
+    bool input_changed = false;
     char msg[256] = {0};
 
     bool wants_exit = false;
@@ -1284,7 +1307,15 @@ static void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg,
                     else if (focus == SET_CODEC)        { codec_idx = (codec_idx + (fwd?1:-1) + 3) % 3; changed = true; }
                     else if (focus == SET_LOG_LEVEL)    { log_idx   = (log_idx   + (fwd?1:-1) + 6) % 6; changed = true; }
                     else if (focus == SET_PS5)          { cfg->ps5         = !cfg->ps5;         changed = true; }
-                    else if (focus == SET_HW_DECODER)   { cfg->hw_decode   = !cfg->hw_decode;   changed = true; }
+                    else if (focus == SET_INPUT_DEBUG)  { cfg->input_debug = !cfg->input_debug; changed = input_changed = true; }
+                    else if (focus == SET_PROFILE)      { profile_idx = (profile_idx + (fwd?1:-1) + N_PROFILES) % N_PROFILES;
+                                                          free(cfg->controller_profile); cfg->controller_profile = strdup(PROFILE_OPTIONS[profile_idx]);
+                                                          changed = input_changed = true; }
+                    else if (focus == SET_RUMBLE)       { cfg->rumble = !cfg->rumble; changed = input_changed = true; }
+                    else if (focus == SET_DS_HID)       { cfg->dualsense_hid = !cfg->dualsense_hid; changed = input_changed = true; }
+                    else if (focus == SET_MOTION)       { cfg->motion = !cfg->motion; changed = input_changed = true; }
+                    else if (focus == SET_TRIGGERS)     { cfg->trigger_effects = !cfg->trigger_effects; changed = input_changed = true; }
+                    else if (focus == SET_BT_PATCH)     { cfg->dualsense_bt_patch = !cfg->dualsense_bt_patch; changed = input_changed = true; }
                     else if (focus == SET_WAKE_ON_START){ cfg->wakeup      = !cfg->wakeup;      changed = true; }
                     else if (focus == SET_SLEEP_ON_EXIT){ cfg->sleep_on_exit = !cfg->sleep_on_exit; changed = true; }
                     else if (focus == SET_RETURN)       { wants_exit = true; continue; }
@@ -1320,6 +1351,14 @@ static void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg,
          * batch, wait for any companion events, drain again, then return
          * cleanly to the launcher. */
         if (wants_exit) {
+            if (input_changed && input) {
+                InputOptions o = {
+                    .debug = cfg->input_debug, .profile_override = cfg->controller_profile,
+                    .rumble = cfg->rumble, .dualsense_hid = cfg->dualsense_hid, .motion = cfg->motion,
+                    .trigger_effects = cfg->trigger_effects, .dualsense_bt_patch = cfg->dualsense_bt_patch,
+                };
+                input_reconfigure(input, &o);
+            }
             SDL_Delay(150);
             SDL_PumpEvents();
             { SDL_Event _d; while (SDL_PollEvent(&_d)) {} }
@@ -1327,7 +1366,7 @@ static void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg,
         }
 
         ui_render_settings_screen(renderer, cfg, focus, msg,
-                                   res_idx, fps_idx, br_idx, codec_idx, log_idx);
+                                   res_idx, fps_idx, br_idx, codec_idx, log_idx, profile_idx);
         SDL_RenderPresent(renderer);
         SDL_Delay(16);
     }
