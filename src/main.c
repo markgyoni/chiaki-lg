@@ -1165,12 +1165,25 @@ int main(int argc, char *argv[])
 
     // ── Launcher UI (shown on every launch) ───────────────────────────────
 
+    // ── Gamepads (before the launcher, so they navigate the menus and the
+    //    controller test sees the same mapping as the stream) ───────────────
+    InputOptions input_opt = {
+        .debug = cfg.input_debug,
+        .profile_override = cfg.controller_profile,
+        .rumble = cfg.rumble,
+        .dualsense_hid = cfg.dualsense_hid,
+        .motion = cfg.motion,
+        .trigger_effects = cfg.trigger_effects,
+        .dualsense_bt_patch = cfg.dualsense_bt_patch,
+    };
+    InputContext *input_ctx = input_init(&input_opt);
+
     app_log("[APP] Showing launcher UI\n");
     SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);  // opaque for UI
     SDL_RenderClear(g_renderer);
     SDL_RenderPresent(g_renderer);
     SDL_SetWindowSize(g_window, cfg.video_width, cfg.video_height);
-    UIResult ui_result = ui_run_registration(g_renderer, &cfg, config_path, &chiaki_log);
+    UIResult ui_result = ui_run_registration(g_renderer, &cfg, config_path, &chiaki_log, input_ctx);
 
     // Back to transparent so NDL plane shows through during stream
     SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_NONE);
@@ -1281,16 +1294,6 @@ int main(int argc, char *argv[])
     }
     app_log("[APP] audio_init OK\n");
 
-    InputOptions input_opt = {
-        .debug = cfg.input_debug,
-        .profile_override = cfg.controller_profile,
-        .rumble = cfg.rumble,
-        .dualsense_hid = cfg.dualsense_hid,
-        .motion = cfg.motion,
-        .trigger_effects = cfg.trigger_effects,
-        .dualsense_bt_patch = cfg.dualsense_bt_patch,
-    };
-    InputContext *input_ctx = input_init(&input_opt);
     g_input_ctx = input_ctx;
 
     // ── Build connect info (done once, reused across reconnects) ──────────────
@@ -1681,13 +1684,13 @@ int main(int argc, char *argv[])
 
 cleanup_session_ctx:
     g_input_ctx = NULL;
-    input_fini(input_ctx);
     audio_fini(audio_ctx);
     video_fini(video_ctx);
     SS4S_PlayerClose(ss4s_player);
     SS4S_Quit();
 
 cleanup_sdl:
+    input_fini(input_ctx);
     SDL_DestroyRenderer(g_renderer);
     SDL_DestroyWindow(g_window);
     SDL_Quit();

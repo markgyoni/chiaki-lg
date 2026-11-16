@@ -11,6 +11,62 @@
 
 #include "config_import.h"
 #include "ui_text.h"
+#include "input.h"
+
+/* ── Gamepad → menu navigation ───────────────────────────────────────────────
+ * Gamepads are read by input.c (grabbed, so webOS never sees them).  Turn
+ * their presses into the same key events the TV remote produces: d-pad or
+ * left stick = arrows (with auto-repeat), Cross = OK, Circle = Back. */
+#define NAV_REPEAT_DELAY_MS 400
+#define NAV_REPEAT_RATE_MS  120
+#define NAV_STICK_THRESHOLD 20000
+
+static void push_key(SDL_Keycode sym)
+{
+    SDL_Event ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.type = SDL_KEYDOWN;
+    ev.key.keysym.sym = sym;
+    SDL_PushEvent(&ev);
+}
+
+static void pad_nav_poll(struct InputContext *in)
+{
+    static uint32_t prev;
+    static Uint32 repeat_at;
+    if (!in) return;
+
+    ChiakiControllerState st;
+    input_get_state(in, &st);
+    uint32_t b = st.buttons;
+    if (st.left_y < -NAV_STICK_THRESHOLD) b |= CHIAKI_CONTROLLER_BUTTON_DPAD_UP;
+    if (st.left_y >  NAV_STICK_THRESHOLD) b |= CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN;
+    if (st.left_x < -NAV_STICK_THRESHOLD) b |= CHIAKI_CONTROLLER_BUTTON_DPAD_LEFT;
+    if (st.left_x >  NAV_STICK_THRESHOLD) b |= CHIAKI_CONTROLLER_BUTTON_DPAD_RIGHT;
+
+    static const struct { uint32_t btn; SDL_Keycode key; bool repeat; } MAP[] = {
+        { CHIAKI_CONTROLLER_BUTTON_DPAD_UP,    SDLK_UP,     true  },
+        { CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN,  SDLK_DOWN,   true  },
+        { CHIAKI_CONTROLLER_BUTTON_DPAD_LEFT,  SDLK_LEFT,   true  },
+        { CHIAKI_CONTROLLER_BUTTON_DPAD_RIGHT, SDLK_RIGHT,  true  },
+        { CHIAKI_CONTROLLER_BUTTON_CROSS,      SDLK_RETURN, false },
+        { CHIAKI_CONTROLLER_BUTTON_MOON,       SDLK_ESCAPE, false },
+    };
+    Uint32 now = SDL_GetTicks();
+    bool held_dir = false;
+    for (size_t i = 0; i < sizeof(MAP) / sizeof(MAP[0]); i++) {
+        bool down = (b & MAP[i].btn) != 0, was = (prev & MAP[i].btn) != 0;
+        if (down && !was) {
+            push_key(MAP[i].key);
+            if (MAP[i].repeat) repeat_at = now + NAV_REPEAT_DELAY_MS;
+        } else if (down && MAP[i].repeat && !held_dir && (Sint32)(now - repeat_at) >= 0) {
+            push_key(MAP[i].key);
+            repeat_at = now + NAV_REPEAT_RATE_MS;
+        }
+        if (down && MAP[i].repeat) held_dir = true;
+    }
+    prev = b;
+}
 
 /* ── Layout ──────────────────────────────────────────────────────────────────
  * Two-panel layout:
@@ -1186,7 +1242,7 @@ static void ui_apply_settings_indices(AppConfig *cfg,
  * ══════════════════════════════════════════════════════════════════════════ */
 
 static void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg,
-                             const char *config_path)
+                             const char *config_path, struct InputContext *input)
 {
     if (!renderer || !cfg) return;
 
@@ -1201,6 +1257,7 @@ static void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg,
     bool wants_exit = false;
 
     while (1) {
+        pad_nav_poll(input);
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
             if (ev.type == SDL_QUIT) { wants_exit = true; continue; }
@@ -1276,7 +1333,8 @@ static void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg,
  * ══════════════════════════════════════════════════════════════════════════ */
 
 UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
-                             const char *config_path, ChiakiLog *log)
+                             const char *config_path, ChiakiLog *log,
+                             struct InputContext *input)
 {
     (void)log;
 
@@ -1300,6 +1358,7 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
     SDL_StartTextInput();
 
     while (1) {
+        pad_nav_poll(input);
         /* Build lightweight debug status string */
         char status[256];
         snprintf(status, sizeof(status),
@@ -1449,7 +1508,7 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
                         }
                     } else if (!editing && focus == 16) {
                         /* Settings — drains Back events internally before returning */
-                        ui_run_settings(renderer, cfg, config_path);
+                        ui_run_settings(renderer, cfg, config_path, input);
                         ui_reload_cfg(cfg, config_path);
                         if (cfg && cfg->host && cfg->host[0])
                             snprintf(ip, sizeof(ip), "%s", cfg->host);

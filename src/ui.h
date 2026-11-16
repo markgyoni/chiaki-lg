@@ -20,8 +20,10 @@ void ui_render_loading(SDL_Renderer *renderer, const char *base_text);
 //  - enter PS5 IP address
 //  - import chiaki-ng config (chiaki-ng-Default.ini) into config.json
 //  - connect to start the stream
+struct InputContext;
 UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
-                             const char *config_path, ChiakiLog *log);
+                             const char *config_path, ChiakiLog *log,
+                             struct InputContext *input);
 
 // Draw a semi-transparent stats overlay on top of the current frame.
 // This draws, but does NOT call SDL_RenderPresent().
