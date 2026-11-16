@@ -179,13 +179,13 @@ Tasks:
 ## Stage 7: DualSense mode + outputs (rumble, adaptive triggers, lightbar)
 
 - [x] When a DualSense is the active pad and `cfg.ps5`: set `info.enable_dualsense = true` (`main.c`, connect info). Make it a config toggle.
-- [ ] Build the output report: USB `0x02` (48 bytes); BT `0x31` (78 bytes, with a sequence tag and a **CRC32 over seed byte `0xA2` + report**). Send it with `write()` on hidraw from the input thread, only when something changes, and rate-limited.
-- [ ] **Rumble**: `CHIAKI_EVENT_RUMBLE` → motor bytes, using compatible-vibration flags.
-- [ ] **Adaptive triggers**: `CHIAKI_EVENT_TRIGGER_EFFECTS` → `type_left` + `left[10]` / `type_right` + `right[10]` copied into the right/left trigger effect blocks, with the trigger-effect enable flags set.
-- [ ] **Lightbar**: `CHIAKI_EVENT_LED_COLOR` → lightbar RGB. **Player LED**: `CHIAKI_EVENT_PLAYER_INDEX`.
-- [ ] **Intensity**: `CHIAKI_EVENT_HAPTIC_INTENSITY` / `CHIAKI_EVENT_TRIGGER_INTENSITY` → reduction fields.
-- [ ] **Reset all outputs** (triggers off, motors off) on session end, disconnect and app exit. Otherwise the triggers stay stiff.
-- [ ] Config toggles: `"trigger_effects": true`, `"rumble": true` (shared with Stage 3).
+- [x] Build the output report: USB `0x02` (48 bytes); BT `0x31` (78 bytes, with a sequence tag and a **CRC32 over seed byte `0xA2` + report**). Send it with `write()` on hidraw from the input thread, only when something changes, and rate-limited.
+- [x] **Rumble**: `CHIAKI_EVENT_RUMBLE` → motor bytes, using compatible-vibration flags.
+- [x] **Adaptive triggers**: `CHIAKI_EVENT_TRIGGER_EFFECTS` → `type_left` + `left[10]` / `type_right` + `right[10]` copied into the right/left trigger effect blocks, with the trigger-effect enable flags set.
+- [x] **Lightbar**: `CHIAKI_EVENT_LED_COLOR` → lightbar RGB. **Player LED**: `CHIAKI_EVENT_PLAYER_INDEX`.
+- [x] **Intensity**: `CHIAKI_EVENT_HAPTIC_INTENSITY` / `CHIAKI_EVENT_TRIGGER_INTENSITY` → reduction fields.
+- [x] **Reset all outputs** (triggers off, motors off) on session end, disconnect and app exit. Otherwise the triggers stay stiff.
+- [x] Config toggles: `"trigger_effects": true`, `"rumble": true` (shared with Stage 3).
 
 **Done when:** in Astro's Playroom (free on PS5) the triggers resist, the pad rumbles, the lightbar follows the game, and everything resets after quitting. Works over USB and BT.
 
