@@ -80,17 +80,18 @@ Choose the profile by (vendor, product, driver). If nothing matches, fall back t
 | `xbox_xpad` | driver `xpad` (USB) | SOUTH=Cross, EAST=Circle, **0x133 (Xbox X)=Square, 0x134 (Xbox Y)=Triangle** | X/Y left, RX/RY right, **Z=L2, RZ=R2** |
 | `generic` | fallback | `xbox_xpad` buttons | heuristics: GAS/BRAKE present → triggers there, else Z/RZ |
 
-- [ ] Implement the profile table and the selection logic. Log the chosen profile as `[PAD] profile=…`.
-- [ ] Rewrite `apply_key_event`/`apply_abs_event` to use the profile instead of `switch` statements. Keep the Select+Start chord only for profiles with `chord_touchpad`. On Sony pads, the real touchpad click button maps to `TOUCHPAD`.
-- [ ] Store the profile on each pad: `GamepadDev.profile`.
-- [ ] Triggers: if a profile has analog L2/R2, ignore the digital `BTN_TL2/TR2` press events. Otherwise map digital-only triggers to 0/255.
-- [ ] Hat/d-pad: also handle the DualSense hat on `ABS_HAT0X/Y` (hid-generic converts the hat switch to two axes; verify this in the Stage 0 logs).
-- [ ] Add a `"controller_profile": "auto"` config override (`AppConfig`, `config.c`, `ui.c` settings, `packaging/config.json*`, README).
-- [ ] Fix the misleading comment at the top of `apply_abs_event` (GAS=R2, BRAKE=L2).
-- [ ] Tighten `is_gamepad()`: require a bound kernel driver. Stage 0 found that LG's virtual `"Smart Remote RCU Input"` and `"LGE Network Input"` nodes pass the current name filter and get grabbed.
+- [x] Implement the profile table and the selection logic. Log the chosen profile as `[PAD] profile=…`.
+- [x] Rewrite `apply_key_event`/`apply_abs_event` to use the profile instead of `switch` statements. Keep the Select+Start chord only for profiles with `chord_touchpad`. On Sony pads, the real touchpad click button maps to `TOUCHPAD`.
+- [x] Store the profile on each pad: `GamepadDev.profile`.
+- [x] Triggers: if a profile has analog L2/R2, ignore the digital `BTN_TL2/TR2` press events. Otherwise map digital-only triggers to 0/255.
+- [x] Hat/d-pad: also handle the DualSense hat on `ABS_HAT0X/Y` (hid-generic converts the hat switch to two axes; verify this in the Stage 0 logs).
+- [x] Add a `"controller_profile": "auto"` config override (config + README; settings-screen entry deferred to Stage 10).
+- [x] Fix the misleading comment at the top of `apply_abs_event` (GAS=R2, BRAKE=L2).
+- [x] Tighten `is_gamepad()`: require a bound kernel driver. Stage 0 found that LG's virtual `"Smart Remote RCU Input"` and `"LGE Network Input"` nodes pass the current name filter and get grabbed.
 
 **Done when** each controller passes this test matrix in the PS5 *Settings → Accessibility → Controllers → Custom button assignments* preview, or on a gamepad-test screen:
 every face button, L1/R1, analog L2/R2 (full 0–255 travel), L3/R3, Create/Share, Options, PS, d-pad including diagonals, both sticks with no drift after trigger use, and touchpad click.
+**Status (2026-11-16):** passed on the TV with a DualSense (BT, `sony_generic`) and an Xbox Series controller (BT, `xbox_bt`). `sony_kernel`, `xpad` and `generic` are untested (no such hardware/driver yet).
 
 ---
 
@@ -112,6 +113,7 @@ every face button, L1/R1, analog L2/R2 (full 0–255 travel), L3/R3, Create/Shar
 ## Stage 3: Standard rumble (Xbox, DS4 on the kernel driver)
 
 **Why:** the PS5 sends `CHIAKI_EVENT_RUMBLE`, and today `main.c` ignores it.
+**Stage 1 finding:** the Xbox Series pad on webOS 6 is driven by hid-generic too and has **no** `EV_FF`, so on this TV Xbox rumble also needs a raw HID output report (Xbox BT report `0x03`: enable mask, left/right trigger motors, strong/weak motors, duration, delay, repeat). Evdev FF stays as the path for pads whose driver supports it.
 
 - [ ] Open pads with `O_RDWR`; currently `O_RDONLY`, which blocks force-feedback writes.
 - [ ] For pads with `EV_FF` + `FF_RUMBLE`: upload one `ff_effect` with `EVIOCSFF`, then update and play it by writing `EV_FF` events. Scale `left` → strong magnitude and `right` → weak magnitude (`u8 → u16`).
