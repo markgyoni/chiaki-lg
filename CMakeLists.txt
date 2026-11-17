@@ -133,6 +133,7 @@ add_executable(chiaki-webos
     src/ui.c
     src/stats.c
     src/pad_diag.c
+    src/pad_profile.c
 )
 
 # Standalone controller diagnostics CLI (run over SSH on the TV; see tools/paddiag.c)

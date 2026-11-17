@@ -1,6 +1,7 @@
 #include "input.h"
 #include "app_log.h"
 #include "pad_diag.h"
+#include "pad_profile.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -86,6 +87,7 @@ typedef struct {
     int  abs_max[ABS_CNT];
     int  abs_logged[ABS_CNT];   // last value logged in input_debug mode
     ChordState chord;
+    PadProfile profile;         // evdev code → chiaki mapping for this device
 } GamepadDev;
 
 struct InputContext {
@@ -98,6 +100,7 @@ struct InputContext {
     pthread_t     reader_thread;
     volatile bool running;
     bool          debug;
+    char          profile_override[32];
 
     ChiakiSession *session;
 };
@@ -147,15 +150,10 @@ static bool apply_key_event(ChiakiControllerState *st, GamepadDev *pad,
     bool pressed = (val != 0);
     ChordState *ch = &pad->chord;
 
-    // ── BTN_RECORD: Xbox Series capture button → Touchpad (direct, no chord) ─
-    if (code == BTN_RECORD) {
-        if (pressed) st->buttons |= CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
-        else         st->buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
-        return true;
-    }
+    if (val == 2) return false;  // autorepeat
 
-    // ── Select / Start: chord detection for Touchpad ─────────────────────────
-    if (code == BTN_SELECT || code == BTN_START) {
+    // ── Select / Start: chord detection for Touchpad (pads without one) ──────
+    if (pad->profile.chord_touchpad && (code == BTN_SELECT || code == BTN_START)) {
         bool is_select = (code == BTN_SELECT);
 
         if (pressed) {
@@ -216,72 +214,50 @@ static bool apply_key_event(ChiakiControllerState *st, GamepadDev *pad,
         }
     }
 
-    // ── All other buttons: direct mapping ────────────────────────────────────
-    uint32_t btn = 0;
-    switch (code) {
-    case BTN_SOUTH:      btn = CHIAKI_CONTROLLER_BUTTON_CROSS;    break;
-    case BTN_EAST:       btn = CHIAKI_CONTROLLER_BUTTON_MOON;     break;
-    case BTN_NORTH:      btn = CHIAKI_CONTROLLER_BUTTON_BOX;      break;
-    case BTN_WEST:       btn = CHIAKI_CONTROLLER_BUTTON_PYRAMID;  break;
-    case BTN_TL:         btn = CHIAKI_CONTROLLER_BUTTON_L1;       break;
-    case BTN_TR:         btn = CHIAKI_CONTROLLER_BUTTON_R1;       break;
-    case BTN_TL2: /* fall-through */ case BTN_TR2: return false;
-    case BTN_MODE:       btn = CHIAKI_CONTROLLER_BUTTON_PS;       break;
-    case BTN_THUMBL:     btn = CHIAKI_CONTROLLER_BUTTON_L3;       break;
-    case BTN_THUMBR:     btn = CHIAKI_CONTROLLER_BUTTON_R3;       break;
-    case BTN_DPAD_UP:    btn = CHIAKI_CONTROLLER_BUTTON_DPAD_UP;    break;
-    case BTN_DPAD_DOWN:  btn = CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN;  break;
-    case BTN_DPAD_LEFT:  btn = CHIAKI_CONTROLLER_BUTTON_DPAD_LEFT;  break;
-    case BTN_DPAD_RIGHT: btn = CHIAKI_CONTROLLER_BUTTON_DPAD_RIGHT; break;
-    default: return false;
-    }
+    // ── All other buttons: profile table ─────────────────────────────────────
+    uint32_t btn = pad_profile_button(&pad->profile, code);
+    if (!btn) return false;
+
+    if (btn == PAD_BTN_L2_DIGITAL) { st->l2_state = pressed ? 255 : 0; return true; }
+    if (btn == PAD_BTN_R2_DIGITAL) { st->r2_state = pressed ? 255 : 0; return true; }
 
     if (pressed) st->buttons |= btn;
     else         st->buttons &= ~btn;
     return true;
 }
 
+static uint8_t normalize_trigger(int val, int min, int max)
+{
+    if (max <= min) return 0;
+    if (val <= min) return 0;
+    if (val >= max) return 255;
+    return (uint8_t)(((int64_t)(val - min) * 255) / (max - min));
+}
+
 // ── Map evdev EV_ABS → chiaki sticks/triggers/dpad ────────────────────────────
 static void apply_abs_event(ChiakiControllerState *st, GamepadDev *pad,
                              uint16_t code, int32_t val)
 {
+    if (code >= ABS_CNT) return;
     int min = pad->abs_min[code];
     int max = pad->abs_max[code];
 
-    // Xbox Wireless Controller on webOS HID driver maps axes differently from
-    // standard xpad. Confirmed via diagnostic logging:
-    //   ABS_X  (0) = left stick X,  range 0-65535
-    //   ABS_Y  (1) = left stick Y,  range 0-65535
-    //   ABS_Z  (2) = right stick X, range 0-65535  (NOT L2!)
-    //   ABS_RZ (5) = right stick Y, range 0-65535  (NOT R2!)
-    //   ABS_GAS   (9)  = L2 trigger, range 0-1023
-    //   ABS_BRAKE (10) = R2 trigger, range 0-1023
-    //   ABS_RX (3) and ABS_RY (4) are not used by this driver.
-    switch (code) {
-    case ABS_X:    st->left_x  = normalize_axis(val, min, max); break;
-    case ABS_Y:    st->left_y  = normalize_axis(val, min, max); break;
-    // Right stick — standard mapping (DualSense / DualShock via hid-sony)
-    case ABS_RX:   st->right_x = normalize_axis(val, min, max); break;
-    case ABS_RY:   st->right_y = normalize_axis(val, min, max); break;
-    // Right stick — Xbox Wireless via webOS HID driver uses ABS_Z/ABS_RZ for sticks
-    case ABS_Z:    st->right_x = normalize_axis(val, min, max); break;
-    case ABS_RZ:   st->right_y = normalize_axis(val, min, max); break;
-    // Triggers — Xbox Wireless via webOS HID uses ABS_GAS/ABS_BRAKE (range 0-1023)
-    case 9:  /* ABS_GAS   — R2 (swapped on webOS HID driver) */
-        if (max > min)
-            st->r2_state = (uint8_t)(((int64_t)(val - min) * 255) / (max - min));
-        break;
-    case 10: /* ABS_BRAKE — L2 (swapped on webOS HID driver) */
-        if (max > min)
-            st->l2_state = (uint8_t)(((int64_t)(val - min) * 255) / (max - min));
-        break;
-    case ABS_HAT0X:
+    // Which evdev axis is which stick/trigger depends on the driver; the
+    // per-controller profile (src/pad_profile.c) says.
+    switch (pad_profile_axis(&pad->profile, code)) {
+    case PAD_AXIS_LX: st->left_x  = normalize_axis(val, min, max); break;
+    case PAD_AXIS_LY: st->left_y  = normalize_axis(val, min, max); break;
+    case PAD_AXIS_RX: st->right_x = normalize_axis(val, min, max); break;
+    case PAD_AXIS_RY: st->right_y = normalize_axis(val, min, max); break;
+    case PAD_AXIS_L2: st->l2_state = normalize_trigger(val, min, max); break;
+    case PAD_AXIS_R2: st->r2_state = normalize_trigger(val, min, max); break;
+    case PAD_AXIS_HATX:
         st->buttons &= ~(CHIAKI_CONTROLLER_BUTTON_DPAD_LEFT |
                          CHIAKI_CONTROLLER_BUTTON_DPAD_RIGHT);
         if (val < 0) st->buttons |= CHIAKI_CONTROLLER_BUTTON_DPAD_LEFT;
         if (val > 0) st->buttons |= CHIAKI_CONTROLLER_BUTTON_DPAD_RIGHT;
         break;
-    case ABS_HAT0Y:
+    case PAD_AXIS_HATY:
         st->buttons &= ~(CHIAKI_CONTROLLER_BUTTON_DPAD_UP |
                          CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN);
         if (val < 0) st->buttons |= CHIAKI_CONTROLLER_BUTTON_DPAD_UP;
@@ -455,17 +431,50 @@ static void open_gamepads(InputContext *ctx)
 
         if (!is_gamepad(fd, devname)) { close(fd); continue; }
 
+        // Real controllers sit behind a kernel HID/USB driver.  LG's virtual
+        // remote/IME nodes ("Smart Remote RCU Input", "LGE Network Input")
+        // have none, yet advertise every key and axis.
+        char drv[64];
+        pad_diag_evdev_driver(path, drv, sizeof(drv));
+        if (!drv[0]) {
+            app_log("[INPUT] Skipping \"%s\" - no kernel driver (virtual device)\n", devname);
+            close(fd);
+            continue;
+        }
+
         GamepadDev *pad = &ctx->pads[ctx->num_pads];
 
         // Read axis ranges for proper normalization
+        int abs_value[ABS_CNT];
+        memset(abs_value, 0, sizeof(abs_value));
         for (int axis = 0; axis < ABS_CNT; axis++) {
             struct input_absinfo info;
+            pad->abs_min[axis] = pad->abs_max[axis] = pad->abs_logged[axis] = 0;
             if (ioctl(fd, EVIOCGABS(axis), &info) == 0) {
                 pad->abs_min[axis] = info.minimum;
                 pad->abs_max[axis] = info.maximum;
                 pad->abs_logged[axis] = info.value;
+                abs_value[axis] = info.value;
             }
         }
+
+        struct input_id id;
+        memset(&id, 0, sizeof(id));
+        ioctl(fd, EVIOCGID, &id);
+
+        uint8_t keybits[(KEY_MAX + 7) / 8 + 1];
+        uint8_t absbits[(ABS_MAX + 7) / 8 + 1];
+        memset(keybits, 0, sizeof(keybits));
+        memset(absbits, 0, sizeof(absbits));
+        ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keybits)), keybits);
+        ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(absbits)), absbits);
+
+        PadDeviceInfo info = {
+            .bustype = id.bustype, .vendor = id.vendor, .product = id.product,
+            .driver = drv, .keybits = keybits, .absbits = absbits,
+            .abs_min = pad->abs_min, .abs_max = pad->abs_max, .abs_value = abs_value,
+        };
+        pad->profile = pad_profile_select(&info, ctx->profile_override);
 
         // EVIOCGRAB: take exclusive ownership.
         // Once grabbed, webOS's hidd daemon and Wayland compositor can no longer
@@ -489,24 +498,16 @@ static void open_gamepads(InputContext *ctx)
         pad->fd = fd;
         ctx->num_pads++;
 
-        struct input_id id;
-        memset(&id, 0, sizeof(id));
-        ioctl(fd, EVIOCGID, &id);
-        char drv[64];
-        pad_diag_evdev_driver(path, drv, sizeof(drv));
-        app_log_always("[INPUT] Opened gamepad: \"%s\" @ %s bus=0x%02x vid=%04x pid=%04x driver=%s\n",
-                       devname, path, id.bustype, id.vendor, id.product,
-                       drv[0] ? drv : "(none)");
+        app_log_always("[INPUT] Opened gamepad: \"%s\" @ %s bus=0x%02x vid=%04x pid=%04x driver=%s "
+                       "profile=%s (%s)%s\n",
+                       devname, path, id.bustype, id.vendor, id.product, drv,
+                       pad->profile.id, pad->profile.description,
+                       pad->profile.chord_touchpad ? " touchpad=Select+Start chord" : "");
     }
     closedir(dir);
 
     if (ctx->num_pads == 0)
-        app_log("[INPUT] No physical gamepads found — TV remote only\n");
-    else {
-        app_log("[INPUT] %d gamepad(s) grabbed exclusively\n", ctx->num_pads);
-        app_log("[INPUT] Touchpad: Select+Start chord (%dms window) + BTN_RECORD direct\n",
-                CHORD_WINDOW_MS);
-    }
+        app_log_always("[INPUT] No physical gamepads found — TV remote only\n");
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────────
@@ -533,7 +534,7 @@ static void log_controller_diagnostics(bool debug)
     closedir(dir);
 }
 
-InputContext *input_init(bool debug)
+InputContext *input_init(bool debug, const char *profile_override)
 {
     InputContext *ctx = calloc(1, sizeof(*ctx));
     if (!ctx) return NULL;
@@ -543,6 +544,10 @@ InputContext *input_init(bool debug)
     ctx->running = true;
     ctx->session = NULL;
     ctx->debug   = debug;
+    snprintf(ctx->profile_override, sizeof(ctx->profile_override), "%s",
+             profile_override ? profile_override : "auto");
+    app_log_always("[INPUT] controller_profile=%s (choices: %s)\n",
+                   ctx->profile_override, pad_profile_ids());
 
     log_controller_diagnostics(debug);
     open_gamepads(ctx);

@@ -7,7 +7,8 @@
 typedef struct InputContext InputContext;
 
 // debug: log every raw evdev event and sample raw HID reports (config "input_debug").
-InputContext *input_init(bool debug);
+// profile_override: config "controller_profile" ("auto" or a profile id, see pad_profile.h).
+InputContext *input_init(bool debug, const char *profile_override);
 void          input_fini(InputContext *ctx);
 
 // Set the active chiaki session so the evdev reader thread can push
