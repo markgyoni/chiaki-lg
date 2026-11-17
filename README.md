@@ -180,7 +180,7 @@ The app reads gamepads directly from the kernel (evdev) and grabs them exclusive
 | Vibration (incl. PS5 haptics → rumble) | ✅ | ✅ with the Bluetooth fix¹ | ✅ | If the kernel driver supports force feedback |
 | Adaptive triggers | ✅ | ✅ with the Bluetooth fix¹ | — | — |
 | Lightbar / player LEDs | ✅ | ✅ with the Bluetooth fix¹ | — | — |
-| HD haptics, microphone, headset jack | Planned (ROADMAP Stage 11) | — | — | — |
+| HD haptics, microphone, speaker/headset jack | Not possible on LG TVs (see ROADMAP Stage 11) | — | — | — |
 
 ¹ DualSense outputs over Bluetooth need the in-memory Bluetooth fix (`dualsense_bt_patch`, see the config reference): a rooted TV with the Homebrew Channel and a known firmware build (webOS 6.5.3 / 03.53.45 so far). Without it, use USB for vibration, triggers and the lightbar. The launcher and the controller test show which outputs are active for each pad.
 

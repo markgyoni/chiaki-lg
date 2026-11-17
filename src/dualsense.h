@@ -105,8 +105,6 @@ typedef struct {
     uint8_t  intensity;                     bool intensity_dirty; /* hi nibble trigger, lo nibble rumble reduction */
     uint8_t  led[3];                        bool led_dirty;
     uint8_t  player_leds;                   bool player_dirty;
-    uint8_t  mute_led;                      bool mute_dirty;   /* 0 off, 1 on, 2 pulse */
-    bool     audio_on;                      bool audio_dirty;  /* USB audio volumes + speaker path */
 } DsOutput;
 
 void ds_output_init(DsOutput *o, int fd, bool bluetooth);
@@ -117,10 +115,6 @@ void ds_output_triggers_off(DsOutput *o);
 void ds_output_set_intensity(DsOutput *o, uint8_t intensity);
 void ds_output_set_lightbar(DsOutput *o, uint8_t r, uint8_t g, uint8_t b);
 void ds_output_set_player(DsOutput *o, uint8_t player_index);
-/* Microphone mute LED: 0 off, 1 on (muted), 2 pulsing. */
-void ds_output_set_mute_led(DsOutput *o, uint8_t mode);
-/* USB: set headphone/speaker/mic volumes and route channels 1-2 to the speaker. */
-void ds_output_enable_audio(DsOutput *o);
 /* Send one output report carrying everything that changed.  If the previous
  * report went out less than the minimum interval ago nothing is sent and the
  * changes stay pending for the next call.  Returns false if the write failed. */

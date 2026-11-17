@@ -61,15 +61,6 @@ void input_push_haptics(InputContext *ctx, const uint8_t *buf, size_t buf_size);
 // CHIAKI_EVENT_MOTION_RESET: re-zero the orientation of motion-capable pads.
 void input_motion_reset(InputContext *ctx);
 
-// Stage 11 (DualSense USB audio).
-// The haptics stream is played on a USB DualSense's actuators: stop turning
-// it into motor rumble for USB DualSenses (other pads keep haptics→rumble).
-void input_set_hd_haptics(InputContext *ctx, bool on);
-// Microphone mute LED on every DualSense: 0 off, 1 on (muted), 2 pulsing.
-void input_set_mic_led(InputContext *ctx, uint8_t mode);
-// DualSense mute-button presses since the last call (cleared per session).
-int  input_take_mute_presses(InputContext *ctx);
-
 // DualSense outputs from the PS5 (all non-blocking; the input thread sends them).
 void input_set_trigger_effects(InputContext *ctx, uint8_t type_l, const uint8_t l[10],
                                uint8_t type_r, const uint8_t r[10]);

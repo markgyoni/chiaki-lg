@@ -225,7 +225,16 @@ Merged into **Stage 11** (DualSense USB audio), which shares the same USB audio 
 
 ---
 
-## Stage 11: DualSense USB audio (microphone, HD haptics, headset)
+## Stage 11: DualSense USB audio (microphone, HD haptics, headset) — not possible, dropped
+
+**Outcome (2026-11-17):** implemented and tested on the TV (webOS 6.5.3, kernel 4.4), then removed. The TV's ALSA sees the pad's USB sound card and the app can open it, but:
+- **Microphone:** capture never delivers data (`arecord` fails with `Input/output error`), on two different EHCI ports, with and without playback running, with every mic/audio-control setting in the output report. The kernel logs nothing; the isochronous IN stream simply returns no samples.
+- **HD haptics / speaker:** playback runs at the right rate without errors, but the pad stays silent: no actuator buzz on channels 3-4 and no speaker beep on 1-2, even with the card's 0 % `PCM Playback Volume` raised to 100 %, rumble emulation off, and the audio block (volumes, output path) sent in the output report.
+- So USB audio to/from the DualSense does not work through this TV's USB stack. The code (`ds_audio.c`, mute-button mic toggle, settings, controller-test buttons) was removed; it is in git history (branch `stage-11-dualsense-audio`, commits `a29be0d`..`0c4ad75`) if a TV with a working USB audio stack turns up. Kept from this stage: rumble-emulation bits only while a motor runs (as SDL does).
+
+---
+
+### Original plan
 
 **Why:** the rest of the DualSense is its audio side: the microphone for voice chat, the HD haptic motors (today they get plain rumble from Stage 8), and the speaker / headset jack. Over USB the pad is a standard USB audio device: a 4-channel output (1–2 speaker/headset, 3–4 haptic actuators) and a mono microphone input. The TV kernel has `snd-usb-audio` built in (`CONFIG_SND_USB_AUDIO=y`, checked 2026-11-16).
 

@@ -497,8 +497,6 @@ typedef enum {
     SET_MOTION,
     SET_TRIGGERS,
     SET_BT_PATCH,
-    SET_HD_HAPTICS,       /* DualSense USB audio */
-    SET_MIC,
     SET_RETURN,
     SET_COUNT
 } SettingsFocus;
@@ -528,8 +526,6 @@ static const char *SETTING_HELP[SET_COUNT] = {
     [SET_TRIGGERS]      = "DualSense adaptive trigger resistance from games.",
     [SET_BT_PATCH]      = "Rooted TVs: fix the TV's Bluetooth so DualSense vibration, triggers and lightbar "
                           "work wirelessly. Nothing is changed on disk; a reboot undoes it.",
-    [SET_HD_HAPTICS]    = "DualSense on USB: play the game's haptics on the controller's actuators (fine-grained, like on a PS5) instead of plain rumble.",
-    [SET_MIC]           = "DualSense on USB: use its microphone for voice chat. Press the controller's mute button during a stream to switch it on or off.",
     [SET_RETURN]        = "Go back to the start screen.",
 };
 
@@ -715,8 +711,6 @@ static void ui_render_settings_screen(SDL_Renderer *r,
     ROW(RX, y, SET_MOTION, "Motion controls", on_off(cfg && cfg->motion));
     ROW(RX, y, SET_TRIGGERS, "Adaptive triggers", on_off(cfg && cfg->trigger_effects));
     ROW(RX, y, SET_BT_PATCH, "Bluetooth fix (DualSense)", on_off(cfg && cfg->dualsense_bt_patch));
-    ROW(RX, y, SET_HD_HAPTICS, "HD haptics (USB)", on_off(cfg && cfg->dualsense_hd_haptics));
-    ROW(RX, y, SET_MIC, "Microphone (USB)", on_off(cfg && cfg->dualsense_mic));
     y += GROUP_GAP;
     draw_button(r, RX, y, COL_W, ROW_H + 6, "Back", focus == SET_RETURN, true);
 #undef ROW
@@ -969,8 +963,6 @@ static bool ui_write_settings_json(const char *config_path, const AppConfig *cfg
     SET_BOOL("dualsense_hid",      cfg->dualsense_hid);
     SET_BOOL("motion",             cfg->motion);
     SET_BOOL("trigger_effects",    cfg->trigger_effects);
-    SET_BOOL("dualsense_hd_haptics", cfg->dualsense_hd_haptics);
-    SET_BOOL("dualsense_mic",      cfg->dualsense_mic);
     SET_BOOL("dualsense_bt_patch", cfg->dualsense_bt_patch);
     SET_BOOL("input_debug",        cfg->input_debug);
 
@@ -1086,8 +1078,6 @@ static void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg,
                     else if (focus == SET_MOTION)       { cfg->motion = !cfg->motion; changed = input_changed = true; }
                     else if (focus == SET_TRIGGERS)     { cfg->trigger_effects = !cfg->trigger_effects; changed = input_changed = true; }
                     else if (focus == SET_BT_PATCH)     { cfg->dualsense_bt_patch = !cfg->dualsense_bt_patch; changed = input_changed = true; }
-                    else if (focus == SET_HD_HAPTICS)   { cfg->dualsense_hd_haptics = !cfg->dualsense_hd_haptics; changed = true; }
-                    else if (focus == SET_MIC)          { cfg->dualsense_mic = !cfg->dualsense_mic; changed = true; }
                     else if (focus == SET_WAKE_ON_START){ cfg->wakeup      = !cfg->wakeup;      changed = true; }
                     else if (focus == SET_SLEEP_ON_EXIT){ cfg->sleep_on_exit = !cfg->sleep_on_exit; changed = true; }
                     else if (focus == SET_RETURN)       { wants_exit = true; continue; }

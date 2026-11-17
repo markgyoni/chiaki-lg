@@ -40,8 +40,7 @@
 #include "ui.h"
 #include "stats.h"
 #include "config_import.h"
-#include "ds_audio.h"
-#include <chiaki/opusencoder.h>
+
 
 #define APP_DIR     "/media/developer/apps/usr/palm/applications/org.homebrew.chiaki"
 #define CONFIG_PATH APP_DIR "/config.json"
@@ -214,27 +213,10 @@ static void ss4s_log_cb(SS4S_LogLevel level, const char *tag, const char *fmt, .
     app_log_always("[SS4S/%s] %s\n", tag ? tag : "?", msg);
 }
 
-// DualSense USB audio for the current session attempt (Stage 11), NULL if off.
-static DsAudio *volatile g_ds_audio = NULL;
-
-// PS5 haptics audio (DualSense mode).  With a USB DualSense it plays on the
-// controller's actuators (HD haptics); every other pad gets it as rumble
-// (input.c, which skips USB DualSenses while HD haptics run).
+// PS5 haptics audio (DualSense mode) → controller rumble, see input.c.
 static void haptics_frame_cb(uint8_t *buf, size_t buf_size, void *user)
 {
-    InputContext *in = (InputContext *)user;
-    DsAudio *a = g_ds_audio;
-    bool hd = ds_audio_haptics_active(a);
-    input_set_hd_haptics(in, hd);
-    if (hd)
-        ds_audio_push_haptics(a, buf, buf_size);
-    input_push_haptics(in, buf, buf_size);
-}
-
-// 10 ms of DualSense microphone audio → Opus → PS5 (capture thread).
-static void mic_frame_cb(int16_t *pcm, void *user)
-{
-    chiaki_opus_encoder_frame(pcm, (ChiakiOpusEncoder *)user);
+    input_push_haptics((InputContext *)user, buf, buf_size);
 }
 
 // ── Signal handler ────────────────────────────────────────────────────────────
@@ -1603,29 +1585,11 @@ int main(int argc, char *argv[])
                 chiaki_session_set_haptics_sink(&g_session, &haptics_sink);
             }
 
-            // DualSense USB audio: HD haptics + microphone (Stage 11).  The mic
-            // goes 48 kHz stereo, 10 ms frames → Opus → PS5, like chiaki-ng.
-            ChiakiOpusEncoder mic_encoder;
-            chiaki_opus_encoder_init(&mic_encoder, &chiaki_log);
-            bool want_mic = cfg.ps5 && cfg.dualsense_mic;
-            if (want_mic) {
-                ChiakiAudioHeader mic_header;
-                chiaki_audio_header_set(&mic_header, 2, 16, 48000, DS_AUDIO_MIC_FRAMES);
-                chiaki_opus_encoder_header(&mic_header, &mic_encoder, &g_session);
-            }
-            g_ds_audio = ds_audio_new(info.enable_dualsense && cfg.dualsense_hd_haptics, want_mic,
-                                      mic_frame_cb, &mic_encoder);
-            bool mic_connected = false, mic_muted = true;
-            input_set_mic_led(input_ctx, 0);
 
             err = chiaki_session_start(&g_session);
             if (err != CHIAKI_ERR_SUCCESS)
             {
                 app_log_always("[APP] chiaki_session_start failed: %s\n", chiaki_error_string(err));
-                DsAudio *dsa = g_ds_audio;
-                g_ds_audio = NULL;
-                ds_audio_free(dsa);
-                chiaki_opus_encoder_fini(&mic_encoder);
                 chiaki_session_fini(&g_session);
                 loading_wait(5000);
                 continue;
@@ -1717,27 +1681,6 @@ int main(int argc, char *argv[])
                 if (g_session_ended || g_should_exit)
                     break;
 
-                // DualSense mute button: switch the USB microphone on/off.
-                for (int presses = input_take_mute_presses(input_ctx); presses > 0; presses--)
-                {
-                    if (!want_mic || !ds_audio_card_present(g_ds_audio))
-                    {
-                        app_log_always("[MIC] mute button: no microphone (%s)\n",
-                                       !want_mic ? "off in Settings" : "connect the DualSense by USB");
-                        continue;
-                    }
-                    if (!mic_connected)
-                    {
-                        chiaki_session_connect_microphone(&g_session);
-                        mic_connected = true;
-                    }
-                    // chiaki's "muted" argument is the current state: true → unmute.
-                    chiaki_session_toggle_microphone(&g_session, mic_muted);
-                    mic_muted = !mic_muted;
-                    ds_audio_mic_enable(g_ds_audio, !mic_muted);
-                    input_set_mic_led(input_ctx, mic_muted ? 1 : 0);
-                    app_log_always("[MIC] microphone %s\n", mic_muted ? "muted" : "on");
-                }
 
                 // Until the first video sample: opaque loading screen.  Then
                 // transparent frames so the NDL plane underneath shows through.
@@ -1812,15 +1755,7 @@ int main(int argc, char *argv[])
             }
             chiaki_session_stop(&g_session);
             chiaki_session_join(&g_session);
-            {
-                // Audio threads stop before the encoder they feed goes away.
-                DsAudio *dsa = g_ds_audio;
-                g_ds_audio = NULL;
-                ds_audio_free(dsa);
-                chiaki_opus_encoder_fini(&mic_encoder);
-                input_set_hd_haptics(input_ctx, false);
-                input_set_mic_led(input_ctx, 0);
-            }
+
             chiaki_session_fini(&g_session);
 
             // ── Reconnect decision ────────────────────────────────────────────

@@ -109,8 +109,6 @@ int config_load(AppConfig *cfg, const char *path)
     cfg->dualsense_hid    = json_get_bool(root, "dualsense_hid",    true);
     cfg->motion           = json_get_bool(root, "motion",           true);
     cfg->trigger_effects  = json_get_bool(root, "trigger_effects",  true);
-    cfg->dualsense_hd_haptics = json_get_bool(root, "dualsense_hd_haptics", true);
-    cfg->dualsense_mic    = json_get_bool(root, "dualsense_mic",    true);
     cfg->dualsense_bt_patch = json_get_bool(root, "dualsense_bt_patch", true);
     cfg->controller_profile = json_get_str(root, "controller_profile");
     if (!cfg->controller_profile || !cfg->controller_profile[0]) {
