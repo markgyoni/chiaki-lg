@@ -40,7 +40,6 @@
 #include "input.h"
 #include "ui.h"
 #include "stats.h"
-#include "config_import.h"
 
 
 #define APP_DIR     "/media/developer/apps/usr/palm/applications/org.homebrew.chiaki"
@@ -1396,7 +1395,7 @@ int main(int argc, char *argv[])
         SDL_RenderClear(g_renderer);
         SDL_RenderPresent(g_renderer);
         SDL_SetWindowSize(g_window, cfg.video_width, cfg.video_height);
-        UIResult ui_result = ui_run_registration(g_renderer, &cfg, config_path, &chiaki_log, input_ctx);
+        UIResult ui_result = ui_run_home(g_renderer, &cfg, config_path, &chiaki_log, input_ctx);
 
         if (ui_result != UI_RESULT_CONNECT || g_should_exit)
         {

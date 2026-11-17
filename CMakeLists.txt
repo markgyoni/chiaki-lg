@@ -126,7 +126,6 @@ fix_pkgconfig_target(PkgConfig::miniupnpc)
 add_executable(chiaki-webos
     src/main.c
     src/config.c
-    src/config_import.c
     src/video.c
     src/audio.c
     src/input.c
@@ -139,6 +138,10 @@ add_executable(chiaki-webos
     src/bt_patch.c
     src/ui_text.c
     src/ui_padtest.c
+    src/ui_home.c
+    src/console_net.c
+    src/psn_login.c
+    src/third_party/qrcodegen.c
 )
 
 # ── Version ───────────────────────────────────────────────────────────────────

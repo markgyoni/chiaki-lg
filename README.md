@@ -15,10 +15,9 @@ Streams PS4/PS5 Remote Play directly to your LG webOS TV.
 - **1080p60 streaming** with H.265, H.265 HDR, or H.264 video codecs
 - **Hardware video decode** via webOS NDL (direct media pipeline) — video is decoded on a dedicated hardware plane below the app surface, not software-rendered
 - **Native Opus audio passthrough** — raw Opus packets fed directly to webOS NDL hardware decoder (no software decode step)
-- **Minimal built-in GUI** — a lightweight launcher screen on every launch lets you enter your PS5's IP, import your chiaki-ng config, adjust settings, and connect
+- **Console manager** — finds PS5/PS4 consoles on the network, links them with the console's PIN (PSN sign-in via a QR code on your phone, once), and keeps several consoles with their own stream settings
 - **Full gamepad support** — DualSense (touchpad, motion, vibration, adaptive triggers, lightbar), Xbox Wireless Controller (with rumble), DualShock 4 and other Bluetooth/USB gamepads via direct evdev with exclusive grab (`EVIOCGRAB`); see [Gamepad support](#gamepad-support)
 - **Controller test screen** — see live what the PS5 receives and test vibration, triggers and lightbar
-- **chiaki-ng settings import** — drop a `chiaki-ng-Default.ini` export file onto the TV to auto-import registration credentials (PS5 IP still required)
 - **Wake-on-LAN** — wakes PS5 from rest mode before connecting (UDP broadcast + unicast)
 - **PSN cloud wakeup** — optional Sony push-notification wakeup via PSN session API when local UDP wakeup is unreliable (requires PSN refresh token)
 - **Rest mode on exit** — Off, On, or Ask (a prompt when you leave the stream)
@@ -37,43 +36,27 @@ Download the latest `.ipk` from the [Releases](../../releases/latest) page, then
 
 ```bash
 ares-setup-device   # one-time TV setup — TV must be on and in Developer Mode
-ares-install --device myTV chiaki-lg_*.ipk
+ares-install --device myTV org.homebrew.chiaki_*.ipk
 ```
 
 Or use [WebOS Dev Manager](https://github.com/webosbrew/dev-manager-desktop) if you prefer a GUI — it can install IPKs directly via drag and drop.
 
 **TV requirements:** LG webOS 4.x or 5+ TV with [Homebrew Channel](https://github.com/webosbrew/webos-homebrew-channel) installed and Developer Mode enabled.
 
-### Step 2 — Export your chiaki-ng registration
+### Step 2 — Add your console
 
-Chiaki-lg does not handle PS5 registration itself. You must have already registered with your PS5 using [chiaki-ng](https://github.com/streetpea/chiaki-ng) on Windows, Linux, MacOS. This is a one-time step.
+1. Turn on the PS5 or PS4 (fully on, not rest mode) on the same network as the TV, and launch **Chiaki-lg**.
+2. Select **+ Add your console**. Consoles on the network are listed; pick yours (or enter its address manually).
+3. The first time, sign in to PlayStation Network: scan the QR code with your phone and sign in. You end up on a page whose address contains `code=v3.XXXXXX`; select **Enter code** on the TV and type the characters after `v3.`. This is needed once for all consoles.
+4. On the console open **Settings → System → Remote Play → Link Device** (PS4: **Settings → Remote Play Connection Settings → Add Device**) and type the 8-digit number into the TV.
 
-**On Computer (Win/Linux/MacOS):**
-1. Open chiaki-ng
-2. Go to **Settings → Config → Export Settings To File**
-3. Copy/use that file and rename it `chiaki-ng-Default.ini` if needed
+The console appears on the start screen. Add more consoles the same way.
 
+### Step 3 — Play
 
-### Step 3 — Copy the file to the TV
+Select a console and press OK to connect. Each console has **Settings** (name, address, resolution, frame rate, bitrate, codec, wake on connect, rest mode on exit, link again, remove) and **Remove**. **App settings** holds the controller, stream overlay and logging options; **Controller test** checks every button, the touchpad, motion and the controller outputs.
 
-```bash
-adb push chiaki-ng-Default.ini \
-  /media/developer/apps/usr/palm/applications/org.homebrew.chiaki/chiaki-ng-Default.ini
-```
-
-Or transfer via [WebOS Dev Manager](https://github.com/webosbrew/dev-manager-desktop)'s file browser.
-
-### Step 4 — Launch and connect
-
-1. Launch **Chiaki-lg** on the TV. The right side of the start screen tells you what is still missing and lists your connected controllers.
-2. Enter the local IP address of your PS5 and select **Import keys**. The `.ini` file is renamed to `.imported` after a successful import so it won't be reprocessed
-3. Open **Settings** and change anything as needed (video, connection, controllers); a help line explains the selected option
-4. Optional: open **Controller test** to check every button, the touchpad, motion, vibration, adaptive triggers and the lightbar
-5. Select **Connect** — streaming starts immediately
-
-The menus work with the TV remote or a gamepad (D-pad/left stick to move, Cross to select, Circle to go back).
-
-> The `.ini` file does not contain your PS5's IP address. You must enter it manually before importing.
+The menus work with the TV remote or a gamepad (D-pad/left stick to move, Cross to select, Circle to go back). Configs from older versions (one console, imported from chiaki-ng) are moved into the console list automatically.
 
 ---
 
@@ -84,57 +67,68 @@ Config file location on the TV:
 /media/developer/apps/usr/palm/applications/org.homebrew.chiaki/config.json
 ```
 
-Most settings are managed through the in-app Settings screen. You can also edit the file directly via SSH or WebOS Dev Manager.
+Everything is managed in the app; you can also edit the file over SSH or WebOS Dev Manager.
 
 ### Example config
 
 ```json
 {
-    "host": "192.168.1.100",
-    "ps5": true,
-    "psn_account_id": "",
-    "registered_key": "",
-    "rp_key": "",
-    "rp_key_type": 2,
-    "video_width": 1920,
-    "video_height": 1080,
-    "video_fps": 60,
-    "video_bitrate": 15000,
-    "video_codec": "h265",
-    "audio_volume": 100,
-    "wakeup": true,
-    "ps5_mac": "AA:BB:CC:DD:EE:FF",
-    "wakeup_delay_ms": 60000,
-    "sleep_on_exit": "ask",
-    "log_level": "warning",
-    "psn_refresh_token": ""
+    "consoles": [
+        {
+            "name": "Living room PS5",
+            "host": "192.168.1.100",
+            "mac": "aa:bb:cc:dd:ee:ff",
+            "ps5": true,
+            "registered_key": "…",
+            "rp_key": "…",
+            "rp_key_type": 2,
+            "video_width": 1920,
+            "video_height": 1080,
+            "video_fps": 60,
+            "video_bitrate": 15000,
+            "video_codec": "h265",
+            "wakeup": true,
+            "sleep_on_exit": "ask"
+        }
+    ],
+    "last_console": 0,
+    "psn_account_id": "…",
+    "psn_refresh_token": "…",
+    "stats_corner": "top-left",
+    "log_level": "warning"
 }
 ```
 
 ### Config reference
 
+Per console (`consoles[]`, up to 8):
+
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `host` | string | `""` | PS5/PS4 local IP address |
-| `ps5` | bool | `true` | `true` for PS5, `false` for PS4 |
-| `psn_account_id` | string | `""` | PSN account ID (base64) — written by import |
-| `registered_key` | string | `""` | Registration key (base64) — written by import |
-| `rp_key` | string | `""` | Remote Play key (base64) — written by import |
-| `rp_key_type` | int | `0` | RP key type — written by import |
-| `video_width` | int | `1920` | Stream width |
-| `video_height` | int | `1080` | Stream height |
-| `video_fps` | int | `60` | Stream frame rate |
-| `video_bitrate` | int | `15000` | Target bitrate in kbps |
-| `video_codec` | string | `"h265"` | `"h265"`, `"h265_hdr"`, or `"h264"` (PS4 always uses H.264) |
+| `name` | string | console nickname | Shown on the start screen |
+| `host` | string | | Console IPv4 address |
+| `mac` | string | from linking | Console MAC (Wake-on-LAN) |
+| `ps5` | bool | `true` | `true` PS5, `false` PS4 |
+| `registered_key`, `rp_key`, `rp_key_type` | | from linking | Remote Play credentials |
+| `video_width` / `video_height` | int | `1920` / `1080` | 720p or 1080p (PS5 Remote Play streams at most 1080p) |
+| `video_fps` | int | `60` | `30` or `60` |
+| `video_bitrate` | int | `15000` | kbps |
+| `video_codec` | string | `"h265"` | `"h265"`, `"h265_hdr"` or `"h264"` (PS4 always uses H.264) |
+| `wakeup` | bool | `true` | Wake the console when connecting |
+| `sleep_on_exit` | string | `"ask"` | Rest mode when you leave a stream: `"off"`, `"on"` or `"ask"` (a prompt when leaving with Back, Down twice or holding Mute) |
+
+App-wide:
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `last_console` | int | `0` | Console selected on the start screen |
+| `psn_account_id` | string | from sign-in | PSN account ID (base64), needed to link consoles |
+| `psn_refresh_token` | string | from sign-in | PSN token for cloud wakeup (see below) |
 | `audio_volume` | int | `100` | Audio volume (0–100) |
-| `wakeup` | bool | `false` | Send wakeup packets before connecting |
-| `ps5_mac` | string | `""` | PS5 MAC address (used for Wake-on-LAN) |
-| `wakeup_delay_ms` | int | `60000` | Max time (ms) to wait for PS5 to wake |
-| `sleep_on_exit` | string | `"ask"` | Rest mode when you leave a stream: `"off"`, `"on"`, or `"ask"` (a prompt when leaving with Back, Down twice or holding Mute). Older `true`/`false` values still work. |
+| `wakeup_delay_ms` | int | `60000` | Max time (ms) to wait for a console to wake |
 | `stats_corner` | string | `"top-left"` | Stats overlay corner: `"top-left"`, `"top-right"`, `"bottom-left"`, `"bottom-right"` |
 | `ss4s_module` | string | `"auto"` | SS4S backend. `"auto"` detects webOS version at startup and selects `ndl-webos5` (webOS 5+) or `ndl-webos4` (webOS 4.x) automatically. Override only if auto-detection fails. |
 | `log_level` | string | `"warning"` | `"off"`, `"error"`, `"warning"`, `"info"`, `"verbose"`, `"debug"` |
-| `psn_refresh_token` | string | `""` | PSN OAuth2 refresh token for cloud wakeup (optional — see below) |
 | `controller_profile` | string | `"auto"` | Gamepad button/axis mapping. `"auto"` picks per controller from vendor ID and kernel driver. Overrides: `"sony_generic"` (DualSense/DS4 on the generic HID driver, the usual case on LG TVs), `"sony_kernel"`, `"xbox_bt"`, `"xpad"`, `"generic"`. The choice is logged as `profile=` in `/tmp/chiaki.log`. |
 | `rumble` | bool | `true` | Forward PS5 vibration (rumble and the haptics stream, converted to rumble) to the controller: DualSense (USB, or Bluetooth with `dualsense_bt_patch`), Xbox pads over Bluetooth, and pads whose kernel driver supports force feedback. |
 | `dualsense_hid` | bool | `true` | Read a DualSense through its raw HID reports instead of the TV's generic driver. Needed for the touchpad, motion, vibration, adaptive triggers and the lightbar. Set `false` to fall back to plain buttons/sticks. |
@@ -145,12 +139,7 @@ Most settings are managed through the in-app Settings screen. You can also edit 
 
 ### PSN cloud wakeup (optional)
 
-If your PS5 ignores local UDP wakeup packets, you can enable PSN cloud wakeup. Copy the `psn_refresh_token` value from your chiaki-ng config:
-
-- **Windows:** `%APPDATA%\Roaming\Chiaki\Chiaki.conf` → field `psn_refresh_token` under `[General]`
-- **Linux:** `~/.config/Chiaki/Chiaki.conf` → same field
-
-Paste the value (beginning with `v3.`) into `psn_refresh_token` in `config.json`. The app uses Sony's push notification service as the primary wakeup method with local UDP as fallback. The token is valid for approximately 60 days. Also confirm that **PS5 Settings → System → Power Saving → Features Available in Rest Mode → Enable Turning On PS5 from Network** is enabled.
+When the console ignores local wakeup packets, the app wakes it through PSN. The sign-in done when you add a console stores the token for this, so there is nothing extra to set up. Also enable **PS5 Settings → System → Power Saving → Features Available in Rest Mode → Enable Turning On PS5 from Network**.
 
 ---
 
@@ -274,12 +263,8 @@ Look for the `[BTFIX]` line. `active` means the fix is applied; `unavailable: ..
 **DualSense: no touchpad or motion**
 Needs `"dualsense_hid": true`. The log should show `DualSense raw HID backend on` and `DualSense full reports active`. If `[HID]` lines say `open ... failed`, the app can't read the controller's raw HID node.
 
-**Import not working / file not found**
-Ensure the file is named exactly `chiaki-ng-Default.ini` and placed in:
-`/media/developer/apps/usr/palm/applications/org.homebrew.chiaki/`
-
 **App crashes on launch**
-Usually a malformed `config.json`. Check `/tmp/chiaki.log`. Delete the config file to let the app recreate defaults, then repeat the import.
+Usually a malformed `config.json`. Check `/tmp/chiaki.log`. Delete the config file to start fresh, then add your console again.
 
 ---
 
@@ -349,7 +334,10 @@ The IPK is output to `build-webos/*.ipk`.
 |---|---|
 | `main.c` | Entry point, session lifecycle, wakeup (UDP + PSN cloud), webOS version detection, SDL event loop |
 | `config.c` / `config.h` | JSON config loader, default config generation |
-| `config_import.c` / `config_import.h` | chiaki-ng INI settings import |
+| `ui_home.c` | Start screen: console list, add console (discovery, PSN sign-in with QR code, PIN), console settings |
+| `console_net.c` / `console_net.h` | Console discovery and registration (libchiaki) |
+| `psn_login.c` / `psn_login.h` | PSN sign-in: code → account ID and refresh token |
+| `third_party/qrcodegen.*` | QR code generator (Project Nayuki, MIT) |
 | `video.c` / `video.h` | Video callback → SS4S/NDL feed, codec negotiation, stats counters |
 | `audio.c` / `audio.h` | Audio callback → SS4S/NDL Opus feed |
 | `input.c` / `input.h` | Evdev gamepad reader thread with `EVIOCGRAB` |

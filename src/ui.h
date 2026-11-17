@@ -15,11 +15,6 @@ typedef enum {
 // This draws, but does NOT call SDL_RenderPresent().
 void ui_render_loading(SDL_Renderer *renderer, const char *base_text);
 
-// Show the launcher/setup screen.
-// Displayed on every launch. Lets the user:
-//  - enter PS5 IP address
-//  - import chiaki-ng config (chiaki-ng-Default.ini) into config.json
-//  - connect to start the stream
 struct InputContext;
 /* Message shown on the launcher the next time it opens (e.g. why a stream
  * could not start).  Contains "ailed" → drawn in the error colour. */
@@ -29,9 +24,18 @@ void ui_set_launcher_notice(const char *text);
  * rest mode; Back, no answer within 15 s or Home keeps it on. */
 bool ui_ask_rest_mode(SDL_Renderer *renderer, struct InputContext *input);
 
-UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
-                             const char *config_path, ChiakiLog *log,
-                             struct InputContext *input);
+/* Start screen: the console list (connect, add, settings per console, remove),
+ * app settings and the controller test.  On UI_RESULT_CONNECT the chosen console
+ * is the active one in cfg (config_select_console). */
+UIResult ui_run_home(SDL_Renderer *renderer, AppConfig *cfg, const char *config_path,
+                     ChiakiLog *log, struct InputContext *input);
+
+/* App settings screen (controllers, overlay, logging). */
+void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg, const char *config_path,
+                     struct InputContext *input);
+
+/* The notice set by ui_set_launcher_notice(), once (then cleared). */
+const char *ui_take_launcher_notice(void);
 
 // Draw a semi-transparent stats overlay on top of the current frame.
 // This draws, but does NOT call SDL_RenderPresent().
