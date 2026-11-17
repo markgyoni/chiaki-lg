@@ -427,6 +427,8 @@ static void activate_dsout_locked(InputContext *ctx, GamepadDev *pad)
     ds_output_set_lightbar(&pad->dsout, ctx->led[0], ctx->led[1], ctx->led[2]);
     ds_output_set_player(&pad->dsout, ctx->player_index);
     ds_output_set_mute_led(&pad->dsout, ctx->mute_led);
+    if (!pad->dsout.bt)
+        ds_output_enable_audio(&pad->dsout);   // USB: speaker/headset volumes + path
     ds_output_set_intensity(&pad->dsout, ctx->ds_intensity);
     if (ctx->trig_valid && ctx->trigger_effects_enabled && !ctx->trig_intensity_off)
         ds_output_set_triggers(&pad->dsout, ctx->trig_type_l, ctx->trig_l,

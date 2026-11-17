@@ -324,6 +324,12 @@ void ds_output_set_mute_led(DsOutput *o, uint8_t mode)
     o->mute_dirty = true;
 }
 
+void ds_output_enable_audio(DsOutput *o)
+{
+    o->audio_on = true;
+    o->audio_dirty = true;
+}
+
 static long mono_ms(void)
 {
     struct timespec t;
@@ -339,7 +345,7 @@ static long min_interval(const DsOutput *o)
 static bool pending(const DsOutput *o)
 {
     return !o->setup_done || o->rumble_dirty || o->trig_dirty || o->intensity_dirty ||
-           o->led_dirty || o->player_dirty || o->mute_dirty;
+           o->led_dirty || o->player_dirty || o->mute_dirty || o->audio_dirty;
 }
 
 bool ds_output_flush_sync(DsOutput *o)
@@ -410,6 +416,16 @@ bool ds_output_flush(DsOutput *o)
         c[1] |= OUT_VF1_PLAYER_LEDS;
         c[43] = o->player_leds;
     }
+    if (o->audio_dirty && o->audio_on) {
+        /* Audio block (hid-playstation / SDL layout): volumes and output path.
+         * Path 3 sends the right channel to the built-in speaker, as the PS5
+         * does when nothing is plugged into the jack. */
+        c[0] |= 0x10 | 0x20 | 0x40 | 0x80;   /* headphone vol, speaker vol, mic vol, audio control */
+        c[4] = 0x7f;                         /* headphone volume */
+        c[5] = 0x64;                         /* speaker volume (max) */
+        c[6] = 0x40;                         /* microphone volume */
+        c[7] = 0x30;                         /* output path select = 3 */
+    }
     if (o->mute_dirty || setup) {
         c[1] |= OUT_VF1_MIC_MUTE_LED;
         c[8] = o->mute_led;
@@ -430,6 +446,6 @@ bool ds_output_flush(DsOutput *o)
     if (w != (ssize_t)size)
         return false;
     o->setup_done = true;
-    o->rumble_dirty = o->trig_dirty = o->intensity_dirty = o->led_dirty = o->player_dirty = o->mute_dirty = false;
+    o->rumble_dirty = o->trig_dirty = o->intensity_dirty = o->led_dirty = o->player_dirty = o->mute_dirty = o->audio_dirty = false;
     return true;
 }
