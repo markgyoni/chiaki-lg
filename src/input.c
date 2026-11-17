@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <stdbool.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -105,9 +106,17 @@ typedef struct {
     struct timespec ds_log_ts;
     DsMotion     motion;        // gyro/accel → chiaki motion + orientation (Stage 6)
     DsOutput     dsout;         // rumble/triggers/lightbar (Stage 7)
+    uint16_t     bus, vendor, product;  // evdev input_id, for the UI
     bool         dsout_active;
     bool         dsout_wait_patch;  // BT DualSense: outputs held until btfix is active
     bool         dsout_failed_logged;
+
+    // Same controller on USB and Bluetooth at once (a DualSense keeps its BT
+    // link while charging over USB): the BT node goes on standby — its input
+    // is ignored and its outputs are off — until the USB cable comes out.
+    char         hw_id[18];     // controller MAC "AA:BB:..", "" if unknown
+    bool         standby;
+    bool         standby_had_dsout; // outputs were on before standby: restore them
 } GamepadDev;
 
 struct InputContext {
@@ -157,6 +166,9 @@ struct InputContext {
     ChiakiSession *session;
 };
 
+static void update_standby_locked(InputContext *ctx);
+static void read_hw_id(GamepadDev *pad);
+
 // ── Normalize evdev ABS value → int16 ─────────────────────────────────────────
 static int16_t normalize_axis(int val, int min, int max)
 {
@@ -196,7 +208,7 @@ static void publish_locked(InputContext *ctx, ChiakiSession *session, bool force
 {
     ChiakiControllerState out = ctx->remote_state;
     for (int i = 0; i < MAX_GAMEPADS; i++) {
-        if (ctx->pads[i].fd < 0) continue;
+        if (ctx->pads[i].fd < 0 || ctx->pads[i].standby) continue;
         ChiakiControllerState merged;
         chiaki_controller_state_or(&merged, &out, &ctx->pads[i].state);
         out = merged;
@@ -429,6 +441,12 @@ static void poll_bt_patch_locked(InputContext *ctx)
     for (int i = 0; i < MAX_GAMEPADS; i++) {
         GamepadDev *pad = &ctx->pads[i];
         if (pad->fd < 0 || !pad->dsout_wait_patch) continue;
+        if (pad->standby) {
+            // Patched while on standby: switch the outputs on when it wakes.
+            pad->dsout_wait_patch = false;
+            pad->standby_had_dsout = (st == BT_PATCH_ACTIVE);
+            continue;
+        }
         if (st == BT_PATCH_ACTIVE) {
             activate_dsout_locked(ctx, pad);
         } else {
@@ -514,6 +532,9 @@ static void try_open_pad_locked(InputContext *ctx, const char *path)
 
     snprintf(pad->path, sizeof(pad->path), "%s", path);
     snprintf(pad->name, sizeof(pad->name), "%s", devname);
+    pad->bus = id.bustype;
+    pad->vendor = id.vendor;
+    pad->product = id.product;
     pad->fd = fd;
     pad->hid_fd = -1;
     pad->dsout_active = pad->dsout_wait_patch = pad->dsout_failed_logged = false;
@@ -562,9 +583,12 @@ static void try_open_pad_locked(InputContext *ctx, const char *path)
         }
     }
 
-    app_log_always("[INPUT] Opened gamepad: \"%s\" @ %s bus=0x%02x vid=%04x pid=%04x driver=%s "
+    read_hw_id(pad);
+
+    app_log_always("[INPUT] Opened gamepad: \"%s\" @ %s bus=0x%02x vid=%04x pid=%04x driver=%s id=%s "
                    "profile=%s (%s)%s\n",
                    devname, path, id.bustype, id.vendor, id.product, drv,
+                   pad->hw_id[0] ? pad->hw_id : "-",
                    pad->profile.id, pad->profile.description,
                    pad->profile.chord_touchpad ? " touchpad=Select+Start chord" : "");
     app_log_always("[INPUT]   rumble: %s%s%s%s\n", pad_output_kind_name(pad->out.kind),
@@ -594,7 +618,79 @@ static void close_pad_locked(InputContext *ctx, int i, const char *why)
     pad->fd = -1;
     // Its held buttons/sticks must not stay pressed on the PS5.
     chiaki_controller_state_set_idle(&pad->state);
+    pad->standby = false;
     publish_locked(ctx, ctx->session, false);
+    update_standby_locked(ctx);
+}
+
+// Put Bluetooth nodes of a controller that is also connected by USB on
+// standby, and wake them when the USB one goes away.  Caller holds state_mutex.
+static void update_standby_locked(InputContext *ctx)
+{
+    bool changed = false;
+    for (int i = 0; i < MAX_GAMEPADS; i++) {
+        GamepadDev *pad = &ctx->pads[i];
+        if (pad->fd < 0) continue;
+
+        const GamepadDev *usb = NULL;
+        if (pad->bus == 0x05 /* BUS_BLUETOOTH */ && pad->hw_id[0]) {
+            for (int j = 0; j < MAX_GAMEPADS; j++) {
+                const GamepadDev *o = &ctx->pads[j];
+                if (j != i && o->fd >= 0 && o->bus == 0x03 /* BUS_USB */ &&
+                    strcasecmp(o->hw_id, pad->hw_id) == 0) { usb = o; break; }
+            }
+        }
+        bool want = usb != NULL;
+        if (want == pad->standby) continue;
+        changed = true;
+
+        if (want) {
+            pad->standby = true;
+            pad->standby_had_dsout = pad->dsout_active || pad->dsout_wait_patch;
+            if (pad->dsout_active) {
+                ds_output_set_rumble(&pad->dsout, 0, 0);
+                ds_output_triggers_off(&pad->dsout);
+                ds_output_flush_sync(&pad->dsout);
+                pad->dsout_active = false;
+            }
+            app_log_always("[INPUT] %s: same controller (%s) is on USB (%s) — Bluetooth on standby\n",
+                           pad->path, pad->hw_id, usb->path);
+        } else {
+            pad->standby = false;
+            if (pad->standby_had_dsout && pad->hid_fd >= 0) {
+                if (bt_patch_state() == BT_PATCH_ACTIVE)
+                    activate_dsout_locked(ctx, pad);
+                else
+                    pad->dsout_wait_patch = true;    // poll_bt_patch_locked takes over
+            }
+            pad->standby_had_dsout = false;
+            if (pad->hid_fd < 0 || pad->hid_reports == 0)
+                resync_pad_locked(pad);
+            app_log_always("[INPUT] %s: USB connection gone — back on Bluetooth\n", pad->path);
+        }
+    }
+    if (changed)
+        publish_locked(ctx, ctx->session, false);
+}
+
+// Controller identity for matching its USB and Bluetooth nodes: the evdev
+// "uniq" (the MAC on Bluetooth) or, for a USB DualSense, the MAC from its
+// pairing-info feature report 0x09 (same byte order as the BT uniq).
+static void read_hw_id(GamepadDev *pad)
+{
+    pad->hw_id[0] = '\0';
+    char uniq[64] = {0};
+    if (ioctl(pad->fd, EVIOCGUNIQ(sizeof(uniq) - 1), uniq) > 0 && strlen(uniq) == 17) {
+        snprintf(pad->hw_id, sizeof(pad->hw_id), "%s", uniq);
+        return;
+    }
+    if (pad->hid_fd >= 0 && ds_is_dualsense(pad->vendor, pad->product)) {
+        uint8_t f[64] = { 0x09 };
+        int r = ioctl(pad->hid_fd, HIDIOCGFEATURE(sizeof(f)), f);
+        if (r >= 7 && f[0] == 0x09)
+            snprintf(pad->hw_id, sizeof(pad->hw_id), "%02X:%02X:%02X:%02X:%02X:%02X",
+                     f[1], f[2], f[3], f[4], f[5], f[6]);
+    }
 }
 
 // Scan /dev/input for gamepads not opened yet.  Caller holds state_mutex.
@@ -616,6 +712,7 @@ static void scan_pads_locked(InputContext *ctx)
         try_open_pad_locked(ctx, path);
     }
     closedir(dir);
+    update_standby_locked(ctx);
 
     // A pad that just appeared may already have buttons held.
     publish_locked(ctx, ctx->session, false);
@@ -923,7 +1020,7 @@ static void *evdev_reader(void *arg)
             uint8_t mw = (uint8_t)(w * ctx->rumble_multiplier);
             for (int i = 0; i < MAX_GAMEPADS; i++) {
                 GamepadDev *pad = &ctx->pads[i];
-                if (pad->fd < 0) continue;
+                if (pad->fd < 0 || pad->standby) continue;
                 if (pad->dsout_active) {
                     ds_output_set_rumble(&pad->dsout, s, w);
                     if (!ds_output_flush(&pad->dsout) && !pad->dsout_failed_logged) {
@@ -1011,6 +1108,96 @@ InputContext *input_init(const InputOptions *opt)
 
     pthread_create(&ctx->reader_thread, NULL, evdev_reader, ctx);
     return ctx;
+}
+
+void input_reconfigure(InputContext *ctx, const InputOptions *opt)
+{
+    if (!ctx || !opt) return;
+    pthread_mutex_lock(&ctx->state_mutex);
+    ctx->debug          = opt->debug;
+    ctx->rumble_enabled = opt->rumble;
+    ctx->dualsense_hid  = opt->dualsense_hid;
+    ctx->motion_enabled = opt->motion;
+    ctx->trigger_effects_enabled = opt->trigger_effects;
+    ctx->bt_patch_enabled = opt->dualsense_bt_patch;
+    snprintf(ctx->profile_override, sizeof(ctx->profile_override), "%s",
+             (opt->profile_override && opt->profile_override[0]) ? opt->profile_override : "auto");
+    app_log_always("[INPUT] reconfigured: controller_profile=%s rumble=%s dualsense_hid=%s motion=%s "
+                   "trigger_effects=%s dualsense_bt_patch=%s — reopening gamepads\n",
+                   ctx->profile_override, opt->rumble ? "on" : "off", opt->dualsense_hid ? "on" : "off",
+                   opt->motion ? "on" : "off", opt->trigger_effects ? "on" : "off",
+                   opt->dualsense_bt_patch ? "on" : "off");
+    for (int i = 0; i < MAX_GAMEPADS; i++)
+        close_pad_locked(ctx, i, "settings changed");
+    scan_pads_locked(ctx);
+    pthread_mutex_unlock(&ctx->state_mutex);
+}
+
+void input_get_state(InputContext *ctx, ChiakiControllerState *out)
+{
+    chiaki_controller_state_set_idle(out);
+    if (!ctx) return;
+    pthread_mutex_lock(&ctx->state_mutex);
+    for (int i = 0; i < MAX_GAMEPADS; i++) {
+        if (ctx->pads[i].fd < 0 || ctx->pads[i].standby) continue;
+        ChiakiControllerState merged;
+        chiaki_controller_state_or(&merged, out, &ctx->pads[i].state);
+        *out = merged;
+    }
+    pthread_mutex_unlock(&ctx->state_mutex);
+}
+
+int input_get_pads(InputContext *ctx, InputPadInfo *out, int max)
+{
+    if (!ctx) return 0;
+    int n = 0;
+    pthread_mutex_lock(&ctx->state_mutex);
+    for (int i = 0; i < MAX_GAMEPADS; i++) {
+        GamepadDev *pad = &ctx->pads[i];
+        // A Bluetooth node on standby is the same controller as a USB one:
+        // list the controller once, under its USB entry.
+        if (pad->fd < 0 || pad->standby) continue;
+        bool bt_twin = false;
+        for (int j = 0; j < MAX_GAMEPADS; j++)
+            if (ctx->pads[j].fd >= 0 && ctx->pads[j].standby &&
+                strcasecmp(ctx->pads[j].hw_id, pad->hw_id) == 0)
+                bt_twin = true;
+        if (n < max) {
+            InputPadInfo *p = &out[n];
+            memset(p, 0, sizeof(*p));
+            // USB descriptors prefix the maker ("Sony Interactive Entertainment ...").
+            const char *nm = pad->name;
+            static const char SONY[] = "Sony Interactive Entertainment ";
+            if (strncmp(nm, SONY, sizeof(SONY) - 1) == 0) nm += sizeof(SONY) - 1;
+            snprintf(p->name, sizeof(p->name), "%s", nm);
+            snprintf(p->connection, sizeof(p->connection), "%s",
+                     pad->bus == 0x03 ? (bt_twin ? "USB (Bluetooth on standby)" : "USB")
+                     : pad->bus == 0x05 ? "Bluetooth" : "Other");
+            snprintf(p->profile, sizeof(p->profile), "%s", pad->profile.id);
+            p->dualsense = ds_is_dualsense(pad->vendor, pad->product);
+            p->raw_hid = pad->hid_fd >= 0;
+            if (pad->standby) {
+                snprintf(p->outputs, sizeof(p->outputs), "Standby: using its USB connection");
+            } else if (pad->dsout_active) {
+                p->outputs_active = true;
+                snprintf(p->outputs, sizeof(p->outputs), "Vibration, adaptive triggers, lightbar%s",
+                         pad->dsout.bt ? " (Bluetooth fix active)" : "");
+            } else if (pad->dsout_wait_patch) {
+                snprintf(p->outputs, sizeof(p->outputs), "Applying Bluetooth fix...");
+            } else if (p->dualsense && p->raw_hid && pad->bus == 0x05) {
+                snprintf(p->outputs, sizeof(p->outputs), "Vibration over USB only (%s)",
+                         ctx->bt_patch_enabled ? "Bluetooth fix unavailable" : "Bluetooth fix off");
+            } else if (pad->out.kind != PAD_OUT_NONE) {
+                p->outputs_active = true;
+                snprintf(p->outputs, sizeof(p->outputs), "Vibration");
+            } else {
+                snprintf(p->outputs, sizeof(p->outputs), "No vibration");
+            }
+        }
+        n++;
+    }
+    pthread_mutex_unlock(&ctx->state_mutex);
+    return n;
 }
 
 void input_set_session(InputContext *ctx, ChiakiSession *session)

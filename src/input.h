@@ -19,6 +19,29 @@ typedef struct {
 InputContext *input_init(const InputOptions *opt);
 void          input_fini(InputContext *ctx);
 
+// Apply changed options (from the settings screen) without restarting: every
+// gamepad is closed and reopened with the new profile / backend / outputs.
+void          input_reconfigure(InputContext *ctx, const InputOptions *opt);
+
+// ── For the launcher UI (menu navigation, controller list, gamepad test) ─────
+
+// Current combined state of all gamepads, exactly as it would be sent to the
+// console (buttons, sticks, triggers, touches, motion).  Excludes the TV remote.
+void input_get_state(InputContext *ctx, ChiakiControllerState *out);
+
+typedef struct {
+    char name[64];
+    char connection[32];     // "USB", "Bluetooth", "USB (Bluetooth on standby)"
+    char profile[24];        // mapping profile id
+    bool dualsense;          // DualSense / DualSense Edge
+    bool raw_hid;            // read through raw HID (touchpad + motion)
+    bool outputs_active;     // rumble/triggers/lightbar reach the pad
+    char outputs[96];        // human-readable output status
+} InputPadInfo;
+
+// Fill up to `max` entries; returns the number of connected gamepads.
+int  input_get_pads(InputContext *ctx, InputPadInfo *out, int max);
+
 // Set the active chiaki session so the evdev reader thread can push
 // controller state updates directly (bypassing SDL's joystick subsystem).
 // Call this after chiaki_session_start() succeeds; pass NULL before

@@ -8,8 +8,68 @@
 #include <json-c/json.h>
 #include <arpa/inet.h>
 #include <ctype.h>
+#include <math.h>
 
 #include "config_import.h"
+#include "ui_text.h"
+#include "input.h"
+#include "ui_padtest.h"
+#include "app_log.h"
+
+/* ── Gamepad → menu navigation ───────────────────────────────────────────────
+ * Gamepads are read by input.c (grabbed, so webOS never sees them).  Turn
+ * their presses into the same key events the TV remote produces: d-pad or
+ * left stick = arrows (with auto-repeat), Cross = OK, Circle = Back. */
+#define NAV_REPEAT_DELAY_MS 400
+#define NAV_REPEAT_RATE_MS  120
+#define NAV_STICK_THRESHOLD 20000
+
+static void push_key(SDL_Keycode sym)
+{
+    SDL_Event ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.type = SDL_KEYDOWN;
+    ev.key.keysym.sym = sym;
+    SDL_PushEvent(&ev);
+}
+
+static void pad_nav_poll(struct InputContext *in)
+{
+    static uint32_t prev;
+    static Uint32 repeat_at;
+    if (!in) return;
+
+    ChiakiControllerState st;
+    input_get_state(in, &st);
+    uint32_t b = st.buttons;
+    if (st.left_y < -NAV_STICK_THRESHOLD) b |= CHIAKI_CONTROLLER_BUTTON_DPAD_UP;
+    if (st.left_y >  NAV_STICK_THRESHOLD) b |= CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN;
+    if (st.left_x < -NAV_STICK_THRESHOLD) b |= CHIAKI_CONTROLLER_BUTTON_DPAD_LEFT;
+    if (st.left_x >  NAV_STICK_THRESHOLD) b |= CHIAKI_CONTROLLER_BUTTON_DPAD_RIGHT;
+
+    static const struct { uint32_t btn; SDL_Keycode key; bool repeat; } MAP[] = {
+        { CHIAKI_CONTROLLER_BUTTON_DPAD_UP,    SDLK_UP,     true  },
+        { CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN,  SDLK_DOWN,   true  },
+        { CHIAKI_CONTROLLER_BUTTON_DPAD_LEFT,  SDLK_LEFT,   true  },
+        { CHIAKI_CONTROLLER_BUTTON_DPAD_RIGHT, SDLK_RIGHT,  true  },
+        { CHIAKI_CONTROLLER_BUTTON_CROSS,      SDLK_RETURN, false },
+        { CHIAKI_CONTROLLER_BUTTON_MOON,       SDLK_ESCAPE, false },
+    };
+    Uint32 now = SDL_GetTicks();
+    bool held_dir = false;
+    for (size_t i = 0; i < sizeof(MAP) / sizeof(MAP[0]); i++) {
+        bool down = (b & MAP[i].btn) != 0, was = (prev & MAP[i].btn) != 0;
+        if (down && !was) {
+            push_key(MAP[i].key);
+            if (MAP[i].repeat) repeat_at = now + NAV_REPEAT_DELAY_MS;
+        } else if (down && MAP[i].repeat && !held_dir && (Sint32)(now - repeat_at) >= 0) {
+            push_key(MAP[i].key);
+            repeat_at = now + NAV_REPEAT_RATE_MS;
+        }
+        if (down && MAP[i].repeat) held_dir = true;
+    }
+    prev = b;
+}
 
 /* ── Layout ──────────────────────────────────────────────────────────────────
  * Two-panel layout:
@@ -80,106 +140,6 @@
 #define COL_TEXT_FAINT      0x3c, 0x4c, 0x78, 0xff
 #define COL_TEXT_CODE       0x48, 0xcc, 0xff, 0xff
 
-/* ── Minimal 5×7 pixel font (printable ASCII 0x20–0x7e) ──────────────────── */
-
-static const uint8_t FONT_DATA[][5] = {
-    {0x00,0x00,0x00,0x00,0x00}, // 0x20 space
-    {0x00,0x00,0x5f,0x00,0x00}, // !
-    {0x00,0x07,0x00,0x07,0x00}, // "
-    {0x14,0x7f,0x14,0x7f,0x14}, // #
-    {0x24,0x2a,0x7f,0x2a,0x12}, // $
-    {0x23,0x13,0x08,0x64,0x62}, // %
-    {0x36,0x49,0x55,0x22,0x50}, // &
-    {0x00,0x05,0x03,0x00,0x00}, // '
-    {0x00,0x1c,0x22,0x41,0x00}, // (
-    {0x00,0x41,0x22,0x1c,0x00}, // )
-    {0x08,0x2a,0x1c,0x2a,0x08}, // *
-    {0x08,0x08,0x3e,0x08,0x08}, // +
-    {0x00,0x50,0x30,0x00,0x00}, // ,
-    {0x08,0x08,0x08,0x08,0x08}, // -
-    {0x00,0x60,0x60,0x00,0x00}, // .
-    {0x20,0x10,0x08,0x04,0x02}, // /
-    {0x3e,0x51,0x49,0x45,0x3e}, // 0
-    {0x00,0x42,0x7f,0x40,0x00}, // 1
-    {0x42,0x61,0x51,0x49,0x46}, // 2
-    {0x21,0x41,0x45,0x4b,0x31}, // 3
-    {0x18,0x14,0x12,0x7f,0x10}, // 4
-    {0x27,0x45,0x45,0x45,0x39}, // 5
-    {0x3c,0x4a,0x49,0x49,0x30}, // 6
-    {0x01,0x71,0x09,0x05,0x03}, // 7
-    {0x36,0x49,0x49,0x49,0x36}, // 8
-    {0x06,0x49,0x49,0x29,0x1e}, // 9
-    {0x00,0x36,0x36,0x00,0x00}, // :
-    {0x00,0x56,0x36,0x00,0x00}, // ;
-    {0x08,0x14,0x22,0x41,0x00}, // <
-    {0x14,0x14,0x14,0x14,0x14}, // =
-    {0x00,0x41,0x22,0x14,0x08}, // >
-    {0x02,0x01,0x51,0x09,0x06}, // ?
-    {0x32,0x49,0x79,0x41,0x3e}, // @
-    {0x7e,0x11,0x11,0x11,0x7e}, // A
-    {0x7f,0x49,0x49,0x49,0x36}, // B
-    {0x3e,0x41,0x41,0x41,0x22}, // C
-    {0x7f,0x41,0x41,0x22,0x1c}, // D
-    {0x7f,0x49,0x49,0x49,0x41}, // E
-    {0x7f,0x09,0x09,0x09,0x01}, // F
-    {0x3e,0x41,0x49,0x49,0x7a}, // G
-    {0x7f,0x08,0x08,0x08,0x7f}, // H
-    {0x00,0x41,0x7f,0x41,0x00}, // I
-    {0x20,0x40,0x41,0x3f,0x01}, // J
-    {0x7f,0x08,0x14,0x22,0x41}, // K
-    {0x7f,0x40,0x40,0x40,0x40}, // L
-    {0x7f,0x02,0x0c,0x02,0x7f}, // M
-    {0x7f,0x04,0x08,0x10,0x7f}, // N
-    {0x3e,0x41,0x41,0x41,0x3e}, // O
-    {0x7f,0x09,0x09,0x09,0x06}, // P
-    {0x3e,0x41,0x51,0x21,0x5e}, // Q
-    {0x7f,0x09,0x19,0x29,0x46}, // R
-    {0x46,0x49,0x49,0x49,0x31}, // S
-    {0x01,0x01,0x7f,0x01,0x01}, // T
-    {0x3f,0x40,0x40,0x40,0x3f}, // U
-    {0x1f,0x20,0x40,0x20,0x1f}, // V
-    {0x3f,0x40,0x38,0x40,0x3f}, // W
-    {0x63,0x14,0x08,0x14,0x63}, // X
-    {0x07,0x08,0x70,0x08,0x07}, // Y
-    {0x61,0x51,0x49,0x45,0x43}, // Z
-    {0x00,0x7f,0x41,0x41,0x00}, // [
-    {0x02,0x04,0x08,0x10,0x20}, /* \ */
-    {0x00,0x41,0x41,0x7f,0x00}, // ]
-    {0x04,0x02,0x01,0x02,0x04}, // ^
-    {0x40,0x40,0x40,0x40,0x40}, // _
-    {0x00,0x01,0x02,0x04,0x00}, // `
-    {0x20,0x54,0x54,0x54,0x78}, // a
-    {0x7f,0x48,0x44,0x44,0x38}, // b
-    {0x38,0x44,0x44,0x44,0x20}, // c
-    {0x38,0x44,0x44,0x48,0x7f}, // d
-    {0x38,0x54,0x54,0x54,0x18}, // e
-    {0x08,0x7e,0x09,0x01,0x02}, // f
-    {0x0c,0x52,0x52,0x52,0x3e}, // g
-    {0x7f,0x08,0x04,0x04,0x78}, // h
-    {0x00,0x44,0x7d,0x40,0x00}, // i
-    {0x20,0x40,0x44,0x3d,0x00}, // j
-    {0x7f,0x10,0x28,0x44,0x00}, // k
-    {0x00,0x41,0x7f,0x40,0x00}, // l
-    {0x7c,0x04,0x18,0x04,0x78}, // m
-    {0x7c,0x08,0x04,0x04,0x78}, // n
-    {0x38,0x44,0x44,0x44,0x38}, // o
-    {0x7c,0x14,0x14,0x14,0x08}, // p
-    {0x08,0x14,0x14,0x18,0x7c}, // q
-    {0x7c,0x08,0x04,0x04,0x08}, // r
-    {0x48,0x54,0x54,0x54,0x20}, // s
-    {0x04,0x3f,0x44,0x40,0x20}, // t
-    {0x3c,0x40,0x40,0x20,0x7c}, // u
-    {0x1c,0x20,0x40,0x20,0x1c}, // v
-    {0x3c,0x40,0x30,0x40,0x3c}, // w
-    {0x44,0x28,0x10,0x28,0x44}, // x
-    {0x0c,0x50,0x50,0x50,0x3c}, // y
-    {0x44,0x64,0x54,0x4c,0x44}, // z
-    {0x00,0x08,0x36,0x41,0x00}, // {
-    {0x00,0x00,0x7f,0x00,0x00}, // |
-    {0x00,0x41,0x36,0x08,0x00}, // }
-    {0x10,0x08,0x08,0x10,0x08}, // ~
-};
-
 /* ── Primitive drawing helpers ───────────────────────────────────────────── */
 
 static void set_color(SDL_Renderer *r, int R, int G, int B, int A)
@@ -193,53 +153,112 @@ static void fill_rect(SDL_Renderer *r, int x, int y, int w, int h)
     SDL_RenderFillRect(r, &rect);
 }
 
+/* Drawing size: the renderer's logical size (1920x1080, set in main.c and
+ * scaled to whatever the TV's UI plane is), else its real output size. */
+static void ui_screen_size(SDL_Renderer *r, int *w, int *h)
+{
+    int lw = 0, lh = 0;
+    SDL_RenderGetLogicalSize(r, &lw, &lh);
+    if (lw > 0 && lh > 0) { *w = lw; *h = lh; return; }
+    (void)SDL_GetRendererOutputSize(r, w, h);
+}
+
 static void draw_rect_outline(SDL_Renderer *r, int x, int y, int w, int h)
 {
     SDL_Rect rect = {x, y, w, h};
     SDL_RenderDrawRect(r, &rect);
 }
 
-static void draw_glyph(SDL_Renderer *r, int x, int y, uint8_t ch, int scale)
+/* Text goes through ui_text (LG TrueType fonts, bitmap fallback).  `scale`
+ * is the old bitmap-font scale: glyphs 7*scale tall, lines 9*scale apart. */
+static int scale_px(int scale) { return scale <= 1 ? 16 : 11 * scale; }
+
+static SDL_Color current_color(SDL_Renderer *r)
 {
-    if (ch < 0x20 || ch > 0x7e) return;
-    const uint8_t *col = FONT_DATA[ch - 0x20];
-    for (int cx = 0; cx < 5; cx++)
-        for (int cy = 0; cy < 7; cy++)
-            if (col[cx] & (1 << cy))
-                fill_rect(r, x + cx * scale, y + cy * scale, scale, scale);
+    SDL_Color c;
+    SDL_GetRenderDrawColor(r, &c.r, &c.g, &c.b, &c.a);
+    return c;
 }
 
 static void draw_text(SDL_Renderer *r, int x, int y, const char *text, int scale)
 {
-    int ox = x;
-    for (const char *p = text; *p; p++) {
-        if (*p == '\n') { x = ox; y += 9 * scale; continue; }
-        draw_glyph(r, x, y, (uint8_t)*p, scale);
-        x += 6 * scale;
+    ui_text_init(r);              /* idempotent; first call loads the fonts */
+    int px = scale_px(scale);
+    SDL_Color c = current_color(r);
+    /* centre each line on where the old 7*scale glyph box was */
+    int top_adj = (7 * scale) / 2 - ui_text_line_height(px) / 2;
+    char line[512];
+    const char *p = text;
+    while (p) {
+        const char *nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) : strlen(p);
+        if (len >= sizeof(line)) len = sizeof(line) - 1;
+        memcpy(line, p, len); line[len] = '\0';
+        ui_text_draw(r, x, y + top_adj, line, px, UI_FONT_REGULAR, c, UI_ALIGN_LEFT);
+        y += ui_text_line_height(px);
+        p = nl ? nl + 1 : NULL;
     }
 }
 
 static int text_width(const char *text, int scale)
 {
-    int w = 0;
-    for (const char *p = text; *p && *p != '\n'; p++)
-        w += 6 * scale;
-    return w;
+    char line[512];
+    size_t len = strcspn(text, "\n");
+    if (len >= sizeof(line)) len = sizeof(line) - 1;
+    memcpy(line, text, len); line[len] = '\0';
+    return ui_text_width(line, scale_px(scale), UI_FONT_REGULAR);
 }
-
 static void draw_text_centered(SDL_Renderer *r, int cx, int y,
                                 const char *text, int scale)
 {
     draw_text(r, cx - text_width(text, scale) / 2, y, text, scale);
 }
 
-/* Rounded rect — two overlapping bars forming a cross with clipped corners */
+/* Rounded rect: a middle band plus one scanline per corner row, inset along
+ * the circle.  radius = h/2 gives a pill. */
 static void fill_rounded_rect(SDL_Renderer *r, int x, int y, int w, int h, int radius)
 {
-    if (radius * 2 >= w) radius = w / 2 - 1;
-    if (radius * 2 >= h) radius = h / 2 - 1;
-    fill_rect(r, x + radius, y,          w - radius * 2, h);
-    fill_rect(r, x,          y + radius, w,              h - radius * 2);
+    if (w <= 0 || h <= 0) return;
+    if (radius * 2 > w) radius = w / 2;
+    if (radius * 2 > h) radius = h / 2;
+    if (radius < 1) { fill_rect(r, x, y, w, h); return; }
+    fill_rect(r, x, y + radius, w, h - radius * 2);
+    for (int i = 0; i < radius; i++) {
+        float dy = (float)radius - (float)i - 0.5f;
+        int inset = radius - (int)(sqrtf((float)(radius * radius) - dy * dy) + 0.5f);
+        fill_rect(r, x + inset, y + i,         w - inset * 2, 1);
+        fill_rect(r, x + inset, y + h - 1 - i, w - inset * 2, 1);
+    }
+}
+
+/* 1px outline matching fill_rounded_rect's shape (no pixel drawn twice, so
+ * translucent colours stay even). */
+static void stroke_rounded_rect(SDL_Renderer *r, int x, int y, int w, int h, int radius)
+{
+    if (w <= 0 || h <= 0) return;
+    if (radius * 2 > w) radius = w / 2;
+    if (radius * 2 > h) radius = h / 2;
+    if (radius < 1) { draw_rect_outline(r, x, y, w, h); return; }
+    fill_rect(r, x,         y + radius, 1, h - radius * 2);
+    fill_rect(r, x + w - 1, y + radius, 1, h - radius * 2);
+    int prev = w / 2;                          /* row 0 runs to the middle: top edge */
+    for (int i = 0; i < radius; i++) {
+        float dy = (float)radius - (float)i - 0.5f;
+        int inset = radius - (int)(sqrtf((float)(radius * radius) - dy * dy) + 0.5f);
+        int len = prev - inset;
+        if (len < 1) len = 1;
+        int top = y + i, bot = y + h - 1 - i;
+        if (i == 0) {                          /* straight top/bottom edge */
+            fill_rect(r, x + inset, top, w - inset * 2, 1);
+            fill_rect(r, x + inset, bot, w - inset * 2, 1);
+        } else {
+            fill_rect(r, x + inset,             top, len, 1);
+            fill_rect(r, x + w - inset - len,   top, len, 1);
+            fill_rect(r, x + inset,             bot, len, 1);
+            fill_rect(r, x + w - inset - len,   bot, len, 1);
+        }
+        prev = inset;
+    }
 }
 
 /* Filled horizontal line (1px tall) */
@@ -248,174 +267,65 @@ static void hline(SDL_Renderer *r, int x, int y, int w)
     fill_rect(r, x, y, w, 1);
 }
 
-/* ── Code block ─────────────────────────────────────────────────────────── */
-
-static void draw_code_block(SDL_Renderer *r, int x, int y, int w,
-                             const char *text, int scale)
-{
-    int lines = 1;
-    for (const char *p = text; *p; p++) if (*p == '\n') lines++;
-    int h = lines * 9 * scale + 20;
-
-    set_color(r, COL_CODE_BG);
-    fill_rounded_rect(r, x, y, w, h, 8);
-    set_color(r, COL_ACCENT_DARK);
-    fill_rect(r, x, y, 4, h);
-    set_color(r, COL_TEXT_CODE);
-    draw_text(r, x + 16, y + 10, text, scale);
-}
-
-/* ── Step progress badge ────────────────────────────────────────────────── */
-
-/* Draw a single numbered step badge (44×44) at top-left corner (bx, by).
- * done   = step completed  → green fill, "OK" label
- * active = current step    → blue fill, white number
- * else   = future step     → dim border, dim number
- */
-static void draw_step_badge(SDL_Renderer *r, int bx, int by, int size,
-                             int num, bool done, bool active)
-{
-    int radius = size / 5;
-
-    /* Badge fill */
-    if (done) {
-        set_color(r, COL_SUCCESS);
-    } else if (active) {
-        set_color(r, COL_ACCENT);
-    } else {
-        set_color(r, COL_BORDER_DIM);
-    }
-    fill_rounded_rect(r, bx, by, size, size, radius);
-
-    /* Inner border highlight for active */
-    if (active) {
-        set_color(r, 0x40, 0x90, 0xff, 0xff);
-        fill_rounded_rect(r, bx + 2, by + 2, size - 4, size - 4, radius - 1);
-        set_color(r, COL_ACCENT);
-        fill_rounded_rect(r, bx + 3, by + 3, size - 6, size - 6, radius - 2);
-    }
-
-    /* Content text — vertically centred */
-    int text_y = by + (size - 14) / 2;  /* 14 = 7 * scale2 */
-    if (done) {
-        set_color(r, 0x00, 0x20, 0x0c, 0xff);
-        draw_text_centered(r, bx + size / 2, text_y, "OK", 2);
-    } else {
-        set_color(r, active ? COL_TEXT : COL_TEXT_FAINT);
-        char s[2] = { '0' + (char)num, '\0' };
-        draw_text_centered(r, bx + size / 2, text_y, s, 2);
-    }
-}
-
-/* ── Status pill ────────────────────────────────────────────────────────── */
-
-static int draw_status_pill(SDL_Renderer *r, int x, int y,
-                             const char *label, bool ok)
-{
-    int tw = text_width(label, 2);
-    int pw = tw + 28;
-    int ph = 34;
-
-    if (ok) {
-        set_color(r, COL_SUCCESS_BG);
-        fill_rounded_rect(r, x, y, pw, ph, ph / 2);
-        set_color(r, COL_SUCCESS);
-        fill_rect(r, x + 6, y + ph/2 - 1, 8, 2);  /* mini tick left */
-        draw_text(r, x + 18, y + (ph - 14) / 2, label, 2);
-    } else {
-        set_color(r, COL_ERROR_BG);
-        fill_rounded_rect(r, x, y, pw, ph, ph / 2);
-        set_color(r, COL_ERROR);
-        draw_text(r, x + 14, y + (ph - 14) / 2, label, 2);
-    }
-    return pw + 12;
-}
-
 /* ── Button ─────────────────────────────────────────────────────────────── */
 
 static void draw_button(SDL_Renderer *r, int x, int y, int w, int h,
                         const char *label, bool focused, bool enabled)
 {
     int radius = 10;
-    int text_y = y + (h - 14) / 2;
+    const int scale = 3;               /* same size as the settings rows */
+    int text_y = y + (h - 7 * scale) / 2;
 
     if (!enabled) {
         /* Disabled — very faint */
         set_color(r, COL_BORDER_DIM);
         fill_rounded_rect(r, x, y, w, h, radius);
         set_color(r, COL_TEXT_FAINT);
-        draw_text_centered(r, x + w / 2, text_y, label, 2);
+        draw_text_centered(r, x + w / 2, text_y, label, scale);
         return;
     }
 
     if (focused) {
-        /* Focused — solid accent fill with subtle top highlight */
+        /* Focused — white ring + accent fill, like the launcher buttons */
+        set_color(r, COL_TEXT);
+        fill_rounded_rect(r, x - 3, y - 3, w + 6, h + 6, radius + 3);
         set_color(r, COL_ACCENT);
         fill_rounded_rect(r, x, y, w, h, radius);
-        /* Subtle top sheen */
-        set_color(r, 0x40, 0x90, 0xff, 0xff);
-        fill_rounded_rect(r, x + 2, y + 2, w - 4, h / 3, radius - 1);
-        set_color(r, COL_ACCENT);
-        fill_rounded_rect(r, x + 2, y + h / 4, w - 4, h / 2, radius - 1);
-        /* White text */
         set_color(r, COL_TEXT);
-        draw_text_centered(r, x + w / 2, text_y, label, 2);
-        /* Bottom accent line */
-        set_color(r, 0x60, 0xa8, 0xff, 0xff);
-        hline(r, x + radius, y + h - 3, w - radius * 2);
+        draw_text_centered(r, x + w / 2, text_y, label, scale);
     } else {
         /* Normal enabled */
         set_color(r, COL_CARD);
         fill_rounded_rect(r, x, y, w, h, radius);
         set_color(r, COL_BORDER);
-        draw_rect_outline(r, x, y, w, h);
+        stroke_rounded_rect(r, x, y, w, h, radius);
         set_color(r, COL_TEXT);
-        draw_text_centered(r, x + w / 2, text_y, label, 2);
+        draw_text_centered(r, x + w / 2, text_y, label, scale);
     }
 }
 
-/* ── Input box ──────────────────────────────────────────────────────────── */
+/* ── Launcher (TV layout: big text, two columns) ────────────────────────── */
 
-static void draw_input_box(SDL_Renderer *r, int x, int y, int w, int h,
-                           const char *text, int cursor, bool focused)
+static SDL_Color rgba(int R, int G, int B, int A) { SDL_Color c = { (Uint8)R, (Uint8)G, (Uint8)B, (Uint8)A }; return c; }
+#define C(name) rgba(name)
+
+/* Large button with TrueType label.  primary = accent-coloured when idle too. */
+static void big_button(SDL_Renderer *r, int x, int y, int w, int h, const char *label,
+                       bool focused, bool enabled, bool primary)
 {
-    int radius = 10;
-
-    /* Background */
-    set_color(r, COL_CODE_BG);
-    fill_rounded_rect(r, x, y, w, h, radius);
-
-    /* Border — thicker + brighter when focused */
     if (focused) {
-        set_color(r, COL_ACCENT);
-        draw_rect_outline(r, x,     y,     w,     h);
-        draw_rect_outline(r, x + 1, y + 1, w - 2, h - 2);
-    } else {
-        set_color(r, COL_BORDER);
-        draw_rect_outline(r, x, y, w, h);
-    }
-
-    int scale = 3;
-    int ty = y + (h - 7 * scale) / 2;
-    int tx = x + 20;
-
-    if (text && text[0]) {
         set_color(r, COL_TEXT);
-        draw_text(r, tx, ty, text, scale);
-    } else {
-        set_color(r, COL_TEXT_FAINT);
-        draw_text(r, tx, ty, "192.168.x.x", scale);
+        fill_rounded_rect(r, x - 4, y - 4, w + 8, h + 8, 16);
     }
-
-    /* Blinking cursor */
-    if (focused && ((SDL_GetTicks() / 500) % 2) == 0) {
-        int cx = tx + cursor * (6 * scale);
-        set_color(r, COL_TEXT);
-        fill_rect(r, cx, ty, 2, 7 * scale);
-    }
+    if (!enabled)        set_color(r, COL_BORDER_DIM);
+    else if (focused)    set_color(r, COL_ACCENT);
+    else if (primary)    set_color(r, COL_ACCENT_DARK);
+    else                 set_color(r, COL_CARD);
+    fill_rounded_rect(r, x, y, w, h, 14);
+    SDL_Color tc = enabled ? C(COL_TEXT) : C(COL_TEXT_FAINT);
+    ui_text_draw(r, x + w / 2, y + (h - ui_text_line_height(38)) / 2, label, 38,
+                 UI_FONT_SEMIBOLD, tc, UI_ALIGN_CENTER);
 }
-
-/* ── Setup screen ───────────────────────────────────────────────────────── */
 
 static void render_setup_screen(SDL_Renderer *r, const char *status,
                                 const char *ip, int focus,
@@ -423,346 +333,201 @@ static void render_setup_screen(SDL_Renderer *r, const char *status,
                                 bool has_keys,
                                 bool can_import,
                                 bool can_connect,
-                                bool show_keypad)
+                                bool show_keypad,
+                                struct InputContext *input)
 {
-    /* Determine current step (1-3) for progress display */
-    int step;
-    if (can_connect)        step = 3;   /* everything ready */
-    else if (has_keys)      step = 2;   /* have keys, need valid IP */
-    else                    step = 1;   /* need keys first */
+    (void)status;
+    ui_text_init(r);
+    const int M = 64, TOP = 150, LW = 900, RX = M + LW + 64, RW = SCREEN_W - RX - M;
+    const int FOOT_Y = SCREEN_H - 76;
 
-    /* ── Background ──────────────────────────────────────────────────────── */
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
     set_color(r, COL_BG);
     fill_rect(r, 0, 0, SCREEN_W, SCREEN_H);
 
-    /* Very top vignette */
-    set_color(r, COL_BG_DEEPER);
-    fill_rect(r, 0, 0, SCREEN_W, 60);
-
-    /* ── Header band ─────────────────────────────────────────────────────── */
-    set_color(r, COL_PANEL);
-    fill_rect(r, 0, HDR_Y, SCREEN_W, HDR_H);
-
-    /* Bottom border of header */
-    set_color(r, COL_BORDER_DIM);
-    hline(r, 0, HDR_Y + HDR_H - 1, SCREEN_W);
-
-    /* Left PS blue accent bar */
+    /* ── Header ── */
     set_color(r, COL_ACCENT);
-    fill_rect(r, 0, HDR_Y, 8, HDR_H);
-
-    /* App name */
-    set_color(r, COL_TEXT);
-    draw_text(r, 36, HDR_Y + 10, "CHIAKI", 4);
-
-    /* Subtitle */
-    set_color(r, COL_TEXT_DIM);
-    draw_text(r, 36, HDR_Y + 50, "PS5 Remote Play for webOS", 2);
-
-    /* Version + build, so it is obvious which build is installed */
-    set_color(r, COL_TEXT_FAINT);
-    draw_text(r, 36 + text_width("CHIAKI", 4) + 24, HDR_Y + 24,
-              "v" APP_VERSION " (" APP_GIT ")", 2);
-
-    /* Right side: connection readiness */
-    if (can_connect) {
-        char ps5str[80];
-        snprintf(ps5str, sizeof(ps5str), "PS5:  %s", ip ? ip : "");
-        int sw = text_width(ps5str, 2);
-        set_color(r, COL_TEXT_DIM);
-        draw_text(r, SCREEN_W - sw - 48, HDR_Y + 14, ps5str, 2);
-        set_color(r, COL_SUCCESS);
-        draw_text(r, SCREEN_W - text_width("Ready to connect", 2) - 48,
-                  HDR_Y + 42, "Ready to connect", 2);
-    } else {
-        set_color(r, COL_TEXT_FAINT);
-        draw_text(r, SCREEN_W - text_width("Setup required", 2) - 48,
-                  HDR_Y + 28, "Setup required", 2);
+    fill_rect(r, 0, 0, SCREEN_W, 6);
+    ui_text_draw(r, M, 28, "Chiaki-lg", 60, UI_FONT_BOLD, C(COL_TEXT), UI_ALIGN_LEFT);
+    ui_text_draw(r, M + ui_text_width("Chiaki-lg", 60, UI_FONT_BOLD) + 28, 50,
+                 "PS5 Remote Play for LG TVs", 32, UI_FONT_REGULAR, C(COL_TEXT_DIM), UI_ALIGN_LEFT);
+    {
+        const char *st = can_connect ? "Ready to connect" : "Setup needed";
+        int tw = ui_text_width(st, 30, UI_FONT_SEMIBOLD);
+        int cx = SCREEN_W - M - tw - 40;
+        if (can_connect) set_color(r, COL_SUCCESS_BG); else set_color(r, COL_WARNING_BG);
+        fill_rounded_rect(r, cx, 30, tw + 40, 54, 27);
+        ui_text_draw(r, cx + 20, 30 + (54 - ui_text_line_height(30)) / 2, st, 30, UI_FONT_SEMIBOLD,
+                     can_connect ? C(COL_SUCCESS) : C(COL_WARNING), UI_ALIGN_LEFT);
+        ui_text_draw(r, SCREEN_W - M, 94, "v" APP_VERSION " (" APP_GIT ")", 24, UI_FONT_REGULAR,
+                     C(COL_TEXT_FAINT), UI_ALIGN_RIGHT);
     }
 
-    /* ── Left panel ──────────────────────────────────────────────────────── */
-    set_color(r, COL_PANEL);
-    fill_rounded_rect(r, LEFT_X, CONTENT_Y, LEFT_W, CONTENT_H, 14);
-
-    /* Left accent strip */
-    set_color(r, COL_ACCENT_DARK);
-    fill_rect(r, LEFT_X, CONTENT_Y + 14, 4, CONTENT_H - 28);
-    set_color(r, COL_ACCENT);
-    /* Highlight the strip portion matching current step */
-    int strip_seg = (CONTENT_H - 28) / 3;
-    fill_rect(r, LEFT_X, CONTENT_Y + 14 + (step - 1) * strip_seg, 4, strip_seg);
-
-    /* ── Step progress row (inside left panel) ───────────────────────────── */
-    const int BADGE_SZ = 44;
-    const int STEP_Y   = CONTENT_Y + 32;
-
-    /* Three badge centre-x positions within the left panel */
-    static const int STEP_OFFSETS[3] = { 110, 340, 570 };
-
-    /* Connecting lines between badges */
-    for (int i = 0; i < 2; i++) {
-        int lx1 = LEFT_X + STEP_OFFSETS[i] + BADGE_SZ / 2;
-        int lx2 = LEFT_X + STEP_OFFSETS[i + 1] - BADGE_SZ / 2;
-        int ly  = STEP_Y + BADGE_SZ / 2;
-        /* Base line */
-        set_color(r, COL_BORDER_DIM);
-        fill_rect(r, lx1, ly - 1, lx2 - lx1, 3);
-        /* Progress overlay */
-        if (i + 2 <= step) {
-            set_color(r, (step == 3) ? COL_SUCCESS : COL_ACCENT_MID);
-            fill_rect(r, lx1, ly - 1, lx2 - lx1, 3);
+    /* ── Left: address + actions ── */
+    int y = TOP;
+    ui_text_draw(r, M, y, "PS5 address", 30, UI_FONT_SEMIBOLD, C(COL_TEXT_DIM), UI_ALIGN_LEFT);
+    y += 46;
+    {
+        bool f = focus == 0 || show_keypad;
+        if (f) { set_color(r, COL_ACCENT); fill_rounded_rect(r, M - 4, y - 4, LW + 8, 112, 16); }
+        set_color(r, COL_CODE_BG);
+        fill_rounded_rect(r, M, y, LW, 104, 14);
+        const char *shown = (ip && ip[0]) ? ip : "192.168.x.x";
+        ui_text_draw(r, M + 32, y + (104 - ui_text_line_height(52)) / 2, shown, 52, UI_FONT_SEMIBOLD,
+                     (ip && ip[0]) ? C(COL_TEXT) : C(COL_TEXT_FAINT), UI_ALIGN_LEFT);
+        if (f && ip && (SDL_GetTicks() / 500) % 2 == 0) {
+            int cx = M + 32 + ui_text_width(ip, 52, UI_FONT_SEMIBOLD) + 4;
+            set_color(r, COL_TEXT);
+            fill_rect(r, cx, y + 26, 3, 52);
         }
+        if (!show_keypad && f)
+            ui_text_draw(r, M + LW - 28, y + (104 - ui_text_line_height(26)) / 2, "OK to edit", 26,
+                         UI_FONT_REGULAR, C(COL_TEXT_DIM), UI_ALIGN_RIGHT);
     }
-
-    /* Step badges */
-    static const char *STEP_LABELS[3] = { "GET KEYS", "PS5 IP", "CONNECT" };
-    for (int i = 0; i < 3; i++) {
-        bool done   = (i + 1 < step);
-        bool active = (i + 1 == step);
-        int bx = LEFT_X + STEP_OFFSETS[i] - BADGE_SZ / 2;
-        draw_step_badge(r, bx, STEP_Y, BADGE_SZ, i + 1, done, active);
-        /* Label below */
-        set_color(r,
-            done   ? COL_SUCCESS :
-            active ? COL_TEXT    : COL_TEXT_FAINT);
-        draw_text_centered(r, LEFT_X + STEP_OFFSETS[i],
-                           STEP_Y + BADGE_SZ + 8, STEP_LABELS[i], 1);
-    }
-
-    /* Divider below step row */
-    set_color(r, COL_BORDER_DIM);
-    hline(r, LEFT_X + 20, STEP_Y + BADGE_SZ + 28, LEFT_W - 40);
-
-    /* ── Step-specific instructions ──────────────────────────────────────── */
-    int ix = LEFT_X + 22;
-    int iy = STEP_Y + BADGE_SZ + 46;
-    int iw = LEFT_W - 44;
-
-    if (step == 1) {
-        set_color(r, COL_ACCENT);
-        draw_text(r, ix, iy, "Import chiaki-ng settings", 2);
-        iy += 32;
-
-        set_color(r, COL_TEXT_DIM);
-        draw_text(r, ix, iy, "On your PC:", 2);
-        iy += 22;
-
-        set_color(r, COL_TEXT);
-        draw_text(r, ix + 14, iy, "1. Open chiaki-ng on computer", 2); iy += 20;
-        draw_text(r, ix + 14, iy, "2. Settings -> Config -> Export Settings To File", 2); iy += 20;
-        draw_text(r, ix + 14, iy, "3. Save chiaki-ng-Default.ini", 2); iy += 32;
-
-        set_color(r, COL_TEXT_DIM);
-        draw_text(r, ix, iy, "Copy to the TV via ADB:", 2); iy += 22;
-
-        draw_code_block(r, ix, iy, iw,
-            "adb push chiaki-ng-Default.ini \\\n"
-            " /media/developer/apps/usr/palm/\n"
-            " applications/org.homebrew.chiaki/", 2);
-        iy += 114;
-
-		set_color(r, COL_TEXT_DIM);
-        draw_text(r, ix, iy, "Or use WebOS Dev Manager for copying file to:", 2); iy += 22;
-		
-		draw_code_block(r, ix, iy, iw,
-            " /media/developer/apps/usr/palm/\n"
-            " applications/org.homebrew.chiaki/", 2);
-        iy += 114;
-
-        set_color(r, COL_TEXT_DIM);
-        draw_text(r, ix, iy, "Then on this screen:", 2); iy += 22;
-        set_color(r, COL_TEXT);
-        draw_text(r, ix + 14, iy, "1. Enter your PS5 IP address", 2); iy += 20;
-        draw_text(r, ix + 14, iy, "2. Press  Import Config", 2);
-
-    } else if (step == 2) {
-        set_color(r, COL_ACCENT);
-        draw_text(r, ix, iy, "Enter your PS5 IP address", 2);
-        iy += 32;
-
-        set_color(r, COL_TEXT_DIM);
-        draw_text(r, ix, iy, "Find it on your PS5:", 2);
-        iy += 22;
-
-        set_color(r, COL_TEXT);
-        draw_text(r, ix + 14, iy, "Settings", 2); iy += 18;
-        draw_text(r, ix + 22, iy, "-> Network", 2); iy += 18;
-        draw_text(r, ix + 30, iy, "-> Connection Status", 2); iy += 18;
-        draw_text(r, ix + 38, iy, "-> View Connection Status", 2); iy += 30;
-
-        set_color(r, COL_TEXT_DIM);
-        draw_text(r, ix, iy, "Look for  IP Address:", 2); iy += 22;
-        draw_code_block(r, ix, iy, iw, "e.g.  192.168.1.50", 2);
-        iy += 52;
-
-        /* Keys status — already done at this point */
-        set_color(r, COL_SUCCESS);
-        draw_text(r, ix, iy, "Registration keys: OK", 2); iy += 22;
-        set_color(r, COL_TEXT_DIM);
-        draw_text(r, ix, iy, "Just need a valid IP to connect.", 2);
-
-    } else {
-        /* Step 3 — ready */
-        set_color(r, COL_ACCENT);
-        draw_text(r, ix, iy, "Ready to stream", 2);
-        iy += 32;
-
-        set_color(r, COL_SUCCESS);
-        draw_text(r, ix, iy, "Registration keys:  OK", 2); iy += 24;
-
-        char ip_line[80];
-        snprintf(ip_line, sizeof(ip_line), "PS5 IP address:     %s", ip ? ip : "?");
-        draw_text(r, ix, iy, ip_line, 2); iy += 40;
-
-        set_color(r, COL_TEXT_DIM);
-        draw_text(r, ix, iy, "Press  Connect  to begin streaming.", 2); iy += 22;
-        draw_text(r, ix, iy, "If wakeup is configured the PS5 will", 2); iy += 20;
-        draw_text(r, ix, iy, "wake automatically from rest mode.", 2);
-    }
-
-    /* ── Right panel ─────────────────────────────────────────────────────── */
-    set_color(r, COL_ELEVATED);
-    fill_rounded_rect(r, RIGHT_X, CONTENT_Y, RIGHT_W, CONTENT_H, 14);
-
-    /* Right panel right accent strip (subtle) */
-    set_color(r, COL_BORDER_DIM);
-    fill_rect(r, RIGHT_X + RIGHT_W - 4, CONTENT_Y + 14, 4, CONTENT_H - 28);
-
-    int rx = RIGHT_X + 52;
-    int ry = CONTENT_Y + 52;
-    int rw = RIGHT_W - 104;
-
-    /* ── IP address field ───────────────────────────────────────────────── */
-    set_color(r, COL_TEXT_DIM);
-    draw_text(r, rx, ry, "PS5 IP ADDRESS", 2);
-    ry += 26;
-
-    bool ip_box_focused = (focus == 0) || show_keypad;
-    int ip_cursor = ip ? (int)strlen(ip) : 0;
-    draw_input_box(r, rx, ry, rw, 72, ip, ip_cursor, ip_box_focused);
-    ry += 72 + 20;
+    y += 104 + 40;
 
     if (show_keypad) {
-        /* ── On-screen numeric keypad ───────────────────────────────────── */
-        set_color(r, COL_TEXT_DIM);
-        draw_text(r, rx, ry, "ENTER IP  (arrows + OK)", 2);
-        ry += 26;
-
-        static const char *KEYS[12] = {
-            "1","2","3","4","5","6","7","8","9",".","0","DEL"
-        };
-        const int KW = 128, KH = 64, KGAP = 12, COLS = 3, ROWS = 4;
-
+        static const char *KEYS[12] = { "1","2","3","4","5","6","7","8","9",".","0","Delete" };
+        const int KW = 280, KH = 92, KG = 20;
         for (int i = 0; i < 12; i++) {
-            int row = i / COLS, col = i % COLS;
-            int kx = rx + col * (KW + KGAP);
-            int ky = ry + row * (KH + KGAP);
-            draw_button(r, kx, ky, KW, KH, KEYS[i], (focus == i + 1), true);
+            int kx = M + (i % 3) * (KW + KG), ky = y + (i / 3) * (KH + KG);
+            big_button(r, kx, ky, KW, KH, KEYS[i], focus == i + 1, true, false);
         }
-
-        int kpad_h = ROWS * KH + (ROWS - 1) * KGAP;
-        int done_y = ry + kpad_h + 16;
-        int done_w = COLS * KW + (COLS - 1) * KGAP;
-        draw_button(r, rx, done_y, done_w, KH, "Done", (focus == 15), true);
-
+        big_button(r, M, y + 4 * (KH + KG), 3 * KW + 2 * KG, KH, "Done", focus == 15, true, true);
     } else {
-        /* ── Main action buttons ────────────────────────────────────────── */
-        int btn_h = 80;
-        int btn_w = (rw - 20) / 2;
-
-        draw_button(r, rx,              ry, btn_w, btn_h, "Import Config", focus == 13, can_import);
-        draw_button(r, rx + btn_w + 20, ry, btn_w, btn_h, "Connect",       focus == 14, can_connect);
-        ry += btn_h + 16;
-
-        /* Settings — full width */
-        draw_button(r, rx, ry, rw, 60, "Settings", focus == 16, true);
-        ry += 60 + 36;
-
-        /* Contextual guidance */
-        if (step == 1 && !can_import) {
-            set_color(r, COL_TEXT_FAINT);
-            draw_text(r, rx, ry, "Enter a PS5 IP address above,", 2); ry += 20;
-            draw_text(r, rx, ry, "then press Import Config to load", 2); ry += 20;
-            draw_text(r, rx, ry, "your registration keys.", 2);
-        } else if (step == 1 && can_import) {
-            set_color(r, COL_TEXT_DIM);
-            draw_text(r, rx, ry, "IP looks good. If you have copied", 2); ry += 20;
-            draw_text(r, rx, ry, "chiaki-ng-Default.ini to the TV,", 2); ry += 20;
-            draw_text(r, rx, ry, "press  Import Config  to continue.", 2);
-        } else if (step == 2) {
-            set_color(r, COL_TEXT_DIM);
-            draw_text(r, rx, ry, "Keys imported. Enter the PS5 IP", 2); ry += 20;
-            draw_text(r, rx, ry, "address above, then press Connect.", 2);
+        const int BW = (LW - 24) / 2, BH = 104;
+        big_button(r, M, y, BW, BH, "Import keys", focus == 13, can_import, false);
+        big_button(r, M + BW + 24, y, BW, BH, "Connect", focus == 14, can_connect, true);
+        y += BH + 24;
+        big_button(r, M, y, BW, BH, "Settings", focus == 16, true, false);
+        big_button(r, M + BW + 24, y, BW, BH, "Controller test", focus == 17, true, false);
+        y += BH + 36;
+        if (msg && msg[0]) {
+            SDL_Color mc = C(COL_WARNING);
+            if (strstr(msg, "OK") || strstr(msg, "updated")) mc = C(COL_SUCCESS);
+            else if (strstr(msg, "ailed") || strstr(msg, "issing") || strstr(msg, "not found")) mc = C(COL_ERROR);
+            ui_text_draw_wrapped(r, M, y, LW, msg, 30, UI_FONT_SEMIBOLD, mc, 3);
         }
     }
 
-    /* ── Status message (if any) ────────────────────────────────────────── */
-    if (msg && msg[0]) {
-        int msg_y = CONTENT_Y + CONTENT_H - 56;
-        /* Pick colour based on content */
-        if (strstr(msg, "OK") || strstr(msg, "ok") || strstr(msg, "Import OK"))
-            set_color(r, COL_SUCCESS);
-        else if (strstr(msg, "failed") || strstr(msg, "MISSING") ||
-                 strstr(msg, "not found") || strstr(msg, "Missing"))
-            set_color(r, COL_ERROR);
-        else
-            set_color(r, COL_WARNING);
-
-        /* Truncate long messages to fit */
-        char trunc[72];
-        strncpy(trunc, msg, sizeof(trunc) - 1);
-        trunc[sizeof(trunc) - 1] = '\0';
-        draw_text(r, RIGHT_X + 52, msg_y, trunc, 2);
-    }
-
-    /* ── Status pills row ───────────────────────────────────────────────── */
-    int pill_y  = FOOTER_Y - 48;
-    int pill_x  = LEFT_X;
-
-    pill_x += draw_status_pill(r, pill_x, pill_y, "Keys: Ready", has_keys);
-    pill_x += draw_status_pill(r, pill_x, pill_y, ip && ip[0] ? ip : "IP: Not Set",
-                                can_import);
-    /* Note: can_connect also requires keys, so it's only true if both are set */
-    if (can_connect)
-        draw_status_pill(r, pill_x, pill_y, "Ready", true);
-
-    /* ── Footer hint bar ────────────────────────────────────────────────── */
+    /* ── Right: help for the current step + controllers ── */
     set_color(r, COL_PANEL);
-    fill_rect(r, 0, FOOTER_Y, SCREEN_W, FOOTER_H);
-    set_color(r, COL_BORDER_DIM);
-    hline(r, 0, FOOTER_Y, SCREEN_W);
-
-    set_color(r, COL_TEXT_FAINT);
-    if (show_keypad) {
-        draw_text_centered(r, SCREEN_W / 2, FOOTER_Y + (FOOTER_H - 14) / 2,
-            "ARROWS: Move keypad   OK: Type digit   RED/BACK: Close keypad", 2);
+    fill_rounded_rect(r, RX, TOP, RW, FOOT_Y - TOP - 30, 18);
+    int ry = TOP + 30, rx = RX + 40, rw = RW - 80;
+    SDL_Color tx = C(COL_TEXT), dim = C(COL_TEXT_DIM);
+    if (!has_keys) {
+        ui_text_draw(r, rx, ry, "Get started", 42, UI_FONT_BOLD, tx, UI_ALIGN_LEFT);
+        ry += 66;
+        ry += ui_text_draw_wrapped(r, rx, ry, rw,
+            "1. On your PC, register your PS5 in chiaki-ng, then use Settings > Config > "
+            "Export Settings To File to save chiaki-ng-Default.ini.", 30, UI_FONT_REGULAR, tx, 0) + 16;
+        ry += ui_text_draw_wrapped(r, rx, ry, rw,
+            "2. Copy that file to the TV (webOS Dev Manager or adb push) into:", 30,
+            UI_FONT_REGULAR, tx, 0) + 8;
+        ry += ui_text_draw_wrapped(r, rx + 20, ry, rw - 20,
+            "/media/developer/apps/usr/palm/applications/org.homebrew.chiaki/", 26,
+            UI_FONT_REGULAR, C(COL_TEXT_CODE), 0) + 16;
+        ry += ui_text_draw_wrapped(r, rx, ry, rw,
+            "3. Enter the PS5 address on the left and press Import keys.", 30,
+            UI_FONT_REGULAR, tx, 0) + 24;
+    } else if (!can_connect) {
+        ui_text_draw(r, rx, ry, "Enter the PS5 address", 42, UI_FONT_BOLD, tx, UI_ALIGN_LEFT);
+        ry += 66;
+        ry += ui_text_draw_wrapped(r, rx, ry, rw,
+            "On the PS5: Settings > Network > Connection Status > View Connection Status. "
+            "Use the IPv4 address, for example 192.168.1.50.", 30, UI_FONT_REGULAR, tx, 0) + 24;
     } else {
-        draw_text_centered(r, SCREEN_W / 2, FOOTER_Y + (FOOTER_H - 14) / 2,
-            "ARROWS: Navigate   OK: Select / Edit IP   RED: Return / Exit", 2);
+        ui_text_draw(r, rx, ry, "Ready to play", 42, UI_FONT_BOLD, tx, UI_ALIGN_LEFT);
+        ry += 66;
+        ry += ui_text_draw_wrapped(r, rx, ry, rw,
+            "Press Connect. During the stream, press Up on the remote for stream statistics, "
+            "Down twice to return here, and Back to close the app.", 30, UI_FONT_REGULAR, dim, 0) + 24;
     }
 
-    /* Debug key-status — very small, bottom-left corner */
-    set_color(r, COL_TEXT_FAINT);
-    draw_text(r, LEFT_X, FOOTER_Y + FOOTER_H - 12, status, 1);
+    /* controllers (live) */
+    set_color(r, COL_BORDER_DIM);
+    fill_rect(r, rx, ry, rw, 2);
+    ry += 24;
+    ui_text_draw(r, rx, ry, "Controllers", 34, UI_FONT_BOLD, tx, UI_ALIGN_LEFT);
+    ry += 54;
+    InputPadInfo pads[4];
+    int n = input ? input_get_pads(input, pads, 4) : 0;
+    if (n == 0)
+        ui_text_draw_wrapped(r, rx, ry, rw, "None connected. Turn a controller on, or plug it in by USB.",
+                             28, UI_FONT_REGULAR, C(COL_WARNING), 2);
+    for (int i = 0; i < n && i < 3 && ry < FOOT_Y - 140; i++) {
+        if (pads[i].outputs_active) set_color(r, COL_SUCCESS); else set_color(r, COL_WARNING);
+        fill_rounded_rect(r, rx, ry + 12, 14, 14, 7);
+        ui_text_draw_fit(r, rx + 30, ry, rw - 30, pads[i].name, 30, UI_FONT_SEMIBOLD, tx);
+        ry += 40;
+        char line[160];
+        snprintf(line, sizeof(line), "%s  -  %s", pads[i].connection, pads[i].outputs);
+        ry += ui_text_draw_wrapped(r, rx + 30, ry, rw - 30, line, 26, UI_FONT_REGULAR, dim, 2) + 14;
+    }
+
+    /* ── Footer ── */
+    set_color(r, COL_PANEL);
+    fill_rect(r, 0, FOOT_Y, SCREEN_W, SCREEN_H - FOOT_Y);
+    ui_text_draw(r, SCREEN_W / 2, FOOT_Y + (SCREEN_H - FOOT_Y - ui_text_line_height(28)) / 2,
+                 show_keypad ? "Arrows: move    OK: type    Back: close keypad"
+                             : "Arrows / D-pad: move    OK / Cross: select    Back / Circle: exit",
+                 28, UI_FONT_REGULAR, dim, UI_ALIGN_CENTER);
 }
+
 
 /* ══════════════════════════════════════════════════════════════════════════
  * Settings screen
  * ══════════════════════════════════════════════════════════════════════════ */
 
 typedef enum {
-    SET_RESOLUTION = 0,   /* VIDEO group */
+    /* left column */
+    SET_RESOLUTION = 0,   /* VIDEO */
     SET_FPS,
     SET_BITRATE,
     SET_CODEC,
-    SET_PS5,              /* SESSION group — must match render order below */
+    SET_PS5,              /* CONNECTION */
     SET_WAKE_ON_START,
     SET_SLEEP_ON_EXIT,
-    SET_HW_DECODER,       /* DEVELOPER group */
-    SET_LOG_LEVEL,
+    SET_LOG_LEVEL,        /* ADVANCED */
+    SET_INPUT_DEBUG,
+    /* right column */
+    SET_PROFILE,          /* CONTROLLERS */
+    SET_RUMBLE,
+    SET_DS_HID,
+    SET_MOTION,
+    SET_TRIGGERS,
+    SET_BT_PATCH,
     SET_RETURN,
     SET_COUNT
 } SettingsFocus;
+
+#define SET_FIRST_RIGHT SET_PROFILE
+
+static const char *PROFILE_OPTIONS[] = {"auto", "sony_generic", "sony_kernel", "xbox_bt", "xpad", "generic"};
+static const char *PROFILE_LABELS[]  = {"Automatic", "PlayStation (HID)", "PlayStation (kernel)",
+                                        "Xbox (Bluetooth)", "Xbox (USB)", "Generic"};
+#define N_PROFILES ((int)(sizeof(PROFILE_OPTIONS) / sizeof(PROFILE_OPTIONS[0])))
+
+/* One line of help per setting, shown under the list for the focused row. */
+static const char *SETTING_HELP[SET_COUNT] = {
+    [SET_RESOLUTION]    = "Stream resolution. 1080p suits most TVs; 2160p needs a fast network.",
+    [SET_FPS]           = "60 fps feels much smoother; 30 fps uses half the bandwidth.",
+    [SET_BITRATE]       = "Higher looks sharper but needs a stronger network. Lower it if the picture stutters.",
+    [SET_CODEC]         = "H.265 gives better quality per bit. Use H.265 HDR for HDR games on an HDR TV.",
+    [SET_PS5]           = "On for a PS5, off for a PS4 (PS4 streams always use H.264).",
+    [SET_WAKE_ON_START] = "Wake the console from rest mode when you press Connect.",
+    [SET_SLEEP_ON_EXIT] = "Put the console into rest mode when you leave the stream.",
+    [SET_LOG_LEVEL]     = "How much is written to /tmp/chiaki.log. Warning is enough unless you are debugging.",
+    [SET_INPUT_DEBUG]   = "Log every raw controller event. Only for diagnosing controller problems.",
+    [SET_PROFILE]       = "Button layout. Automatic picks the right one for each controller.",
+    [SET_RUMBLE]        = "Pass vibration from games to your controller.",
+    [SET_DS_HID]        = "Read the DualSense directly: touchpad, motion, adaptive triggers, lightbar.",
+    [SET_MOTION]        = "Send DualSense gyro and accelerometer to the console (motion aiming).",
+    [SET_TRIGGERS]      = "DualSense adaptive trigger resistance from games.",
+    [SET_BT_PATCH]      = "Rooted TVs: fix the TV's Bluetooth so DualSense vibration, triggers and lightbar "
+                          "work wirelessly. Nothing is changed on disk; a reboot undoes it.",
+    [SET_RETURN]        = "Go back to the start screen.",
+};
 
 typedef struct { int w, h; const char *label; } ResOption;
 
@@ -857,13 +622,13 @@ static void ui_draw_option_row(SDL_Renderer *r, int x, int y, int w, int h,
         set_color(r, COL_CODE_BG);
         fill_rounded_rect(r, x, y, w, h, radius);
         set_color(r, COL_BORDER_DIM);
-        draw_rect_outline(r, x, y, w, h);
+        stroke_rounded_rect(r, x, y, w, h, radius);
     }
 
-    int scale = 2;
+    int scale = 3;
     int ty = y + (h - 7 * scale) / 2;
 
-    set_color(r, focused ? COL_TEXT : COL_TEXT_DIM);
+    if (focused) set_color(r, COL_TEXT); else set_color(r, COL_TEXT_DIM);
     draw_text(r, x + 20, ty, label, scale);
 
     if (value) {
@@ -882,21 +647,19 @@ static void ui_draw_option_row(SDL_Renderer *r, int x, int y, int w, int h,
     }
 }
 
+static const char *on_off(bool v) { return v ? "On" : "Off"; }
+
 static void ui_render_settings_screen(SDL_Renderer *r,
                                       const AppConfig *cfg,
                                       int focus,
                                       const char *msg,
                                       int res_idx, int fps_idx,
                                       int br_idx,  int codec_idx,
-                                      int log_idx)
+                                      int log_idx, int profile_idx)
 {
-    /* Background */
+    /* Background + header */
     set_color(r, COL_BG);
     fill_rect(r, 0, 0, SCREEN_W, SCREEN_H);
-    set_color(r, COL_BG_DEEPER);
-    fill_rect(r, 0, 0, SCREEN_W, 60);
-
-    /* Header */
     set_color(r, COL_PANEL);
     fill_rect(r, 0, HDR_Y, SCREEN_W, HDR_H);
     set_color(r, COL_BORDER_DIM);
@@ -904,102 +667,80 @@ static void ui_render_settings_screen(SDL_Renderer *r,
     set_color(r, COL_ACCENT);
     fill_rect(r, 0, HDR_Y, 8, HDR_H);
     set_color(r, COL_TEXT);
-    draw_text(r, 36, HDR_Y + 10, "CHIAKI", 4);
+    draw_text(r, 36, HDR_Y + 18, "Settings", 4);
     set_color(r, COL_TEXT_DIM);
-    draw_text(r, 36, HDR_Y + 50, "Settings", 2);
+    draw_text(r, SCREEN_W - 48 - text_width("Saved automatically", 2), HDR_Y + 30,
+              "Saved automatically", 2);
 
-    /* Content area (single card, centred) */
-    const int CX    = 200;
-    const int CY    = CONTENT_Y;
-    const int CW    = SCREEN_W - 400;
-    const int CH    = CONTENT_H;
-
-    set_color(r, COL_PANEL);
-    fill_rounded_rect(r, CX, CY, CW, CH, 14);
-    set_color(r, COL_ACCENT);
-    fill_rect(r, CX, CY, 6, CH);
-
-    /* Section header */
-    int rx = CX + 36, ry = CY + 22, rw = CW - 72;
-    set_color(r, COL_TEXT);
-    draw_text(r, rx, ry, "Streaming Options", 3);
-    set_color(r, COL_TEXT_FAINT);
-    draw_text(r, rx + CW - 72 - text_width("Saved to config.json", 2),
-              ry + 4, "Saved to config.json", 2);
-    ry += 38;
-    set_color(r, COL_BORDER_DIM);
-    hline(r, rx, ry, rw);
-    ry += 10;
-
-    const int ROW_H   = 44;
-    const int ROW_GAP = 6;
+    /* Two columns of rows */
+    const int ROW_H = 58, ROW_GAP = 8, GROUP_GAP = 18;
+    const int COL_W = (SCREEN_W - 60 * 2 - 40) / 2;
+    const int LX = 60, RX = LX + COL_W + 40;
     char vbuf[64];
 
-    /* Group: Video */
-    set_color(r, COL_TEXT_FAINT);
-    draw_text(r, rx, ry, "VIDEO", 2); ry += 20;
+#define GROUP(x, y, name) do { set_color(r, COL_ACCENT); draw_text(r, (x) + 4, (y), name, 2); (y) += 34; } while (0)
+#define ROW(x, y, id, label, value) do { \
+        ui_draw_option_row(r, (x), (y), COL_W, ROW_H, label, value, focus == (id)); \
+        (y) += ROW_H + ROW_GAP; } while (0)
 
+    int y = CONTENT_Y + 6;
+    GROUP(LX, y, "VIDEO");
     snprintf(vbuf, sizeof(vbuf), "%s  (%dx%d)",
              RES_OPTIONS[res_idx].label, RES_OPTIONS[res_idx].w, RES_OPTIONS[res_idx].h);
-    ui_draw_option_row(r, rx, ry, rw, ROW_H, "Resolution", vbuf, focus == SET_RESOLUTION);
-    ry += ROW_H + ROW_GAP;
-
+    ROW(LX, y, SET_RESOLUTION, "Resolution", vbuf);
     snprintf(vbuf, sizeof(vbuf), "%d fps", FPS_OPTIONS[fps_idx]);
-    ui_draw_option_row(r, rx, ry, rw, ROW_H, "Frame Rate", vbuf, focus == SET_FPS);
-    ry += ROW_H + ROW_GAP;
+    ROW(LX, y, SET_FPS, "Frame rate", vbuf);
+    snprintf(vbuf, sizeof(vbuf), "%d Mbit/s", BITRATE_OPTIONS[br_idx] / 1000);
+    ROW(LX, y, SET_BITRATE, "Bitrate", vbuf);
+    ROW(LX, y, SET_CODEC, "Codec", CODEC_LABELS[codec_idx]);
+    y += GROUP_GAP;
+    GROUP(LX, y, "CONNECTION");
+    ROW(LX, y, SET_PS5, "PS5 console", on_off(cfg && cfg->ps5));
+    ROW(LX, y, SET_WAKE_ON_START, "Wake console on connect", on_off(cfg && cfg->wakeup));
+    ROW(LX, y, SET_SLEEP_ON_EXIT, "Rest mode on exit", on_off(cfg && cfg->sleep_on_exit));
+    y += GROUP_GAP;
+    GROUP(LX, y, "ADVANCED");
+    ROW(LX, y, SET_LOG_LEVEL, "Log level", LOG_LEVEL_LABELS[log_idx]);
+    ROW(LX, y, SET_INPUT_DEBUG, "Controller debug log", on_off(cfg && cfg->input_debug));
 
-    snprintf(vbuf, sizeof(vbuf), "%d kbps", BITRATE_OPTIONS[br_idx]);
-    ui_draw_option_row(r, rx, ry, rw, ROW_H, "Bitrate", vbuf, focus == SET_BITRATE);
-    ry += ROW_H + ROW_GAP;
+    y = CONTENT_Y + 6;
+    GROUP(RX, y, "CONTROLLERS");
+    ROW(RX, y, SET_PROFILE, "Button layout", PROFILE_LABELS[profile_idx]);
+    ROW(RX, y, SET_RUMBLE, "Vibration", on_off(cfg && cfg->rumble));
+    ROW(RX, y, SET_DS_HID, "DualSense enhanced", on_off(cfg && cfg->dualsense_hid));
+    ROW(RX, y, SET_MOTION, "Motion controls", on_off(cfg && cfg->motion));
+    ROW(RX, y, SET_TRIGGERS, "Adaptive triggers", on_off(cfg && cfg->trigger_effects));
+    ROW(RX, y, SET_BT_PATCH, "Bluetooth fix (DualSense)", on_off(cfg && cfg->dualsense_bt_patch));
+    y += GROUP_GAP;
+    draw_button(r, RX, y, COL_W, ROW_H + 6, "Back", focus == SET_RETURN, true);
+#undef ROW
+#undef GROUP
 
-    ui_draw_option_row(r, rx, ry, rw, ROW_H, "Codec", CODEC_LABELS[codec_idx], focus == SET_CODEC);
-    ry += ROW_H + ROW_GAP + 4;
-
-    /* Group: Session */
-    set_color(r, COL_TEXT_FAINT);
-    draw_text(r, rx, ry, "SESSION", 2); ry += 20;
-
-    ui_draw_option_row(r, rx, ry, rw, ROW_H, "PS5 Mode",
-                       (cfg && cfg->ps5) ? "On" : "Off", focus == SET_PS5);
-    ry += ROW_H + ROW_GAP;
-
-    ui_draw_option_row(r, rx, ry, rw, ROW_H, "Wake on Start",
-                       (cfg && cfg->wakeup) ? "On" : "Off", focus == SET_WAKE_ON_START);
-    ry += ROW_H + ROW_GAP;
-
-    ui_draw_option_row(r, rx, ry, rw, ROW_H, "Sleep on Exit",
-                       (cfg && cfg->sleep_on_exit) ? "On" : "Off", focus == SET_SLEEP_ON_EXIT);
-    ry += ROW_H + ROW_GAP + 4;
-
-    /* Group: Developer */
-    set_color(r, COL_TEXT_FAINT);
-    draw_text(r, rx, ry, "DEVELOPER", 2); ry += 20;
-
-    ui_draw_option_row(r, rx, ry, rw, ROW_H, "HW Decoder (unused)",
-                       (cfg && cfg->hw_decode) ? "On" : "Off", focus == SET_HW_DECODER);
-    ry += ROW_H + ROW_GAP;
-
-    ui_draw_option_row(r, rx, ry, rw, ROW_H, "Log Level",
-                       LOG_LEVEL_LABELS[log_idx], focus == SET_LOG_LEVEL);
-    ry += ROW_H + ROW_GAP + 8;
-
-    /* Return button */
-    draw_button(r, rx, ry, rw, 50, "Return", focus == SET_RETURN, true);
-
-    /* Message (below card, above footer) */
-    if (msg && msg[0]) {
-        set_color(r, COL_TEXT_DIM);
-        draw_text_centered(r, SCREEN_W / 2, CY + CH + 10, msg, 2);
+    /* Help for the focused row */
+    const int FOOT_Y = SCREEN_H - 70, FOOT_H = 70;
+    int help_y = FOOT_Y - 116;
+    set_color(r, COL_PANEL);
+    fill_rounded_rect(r, LX, help_y, SCREEN_W - 2 * LX, 100, 12);
+    set_color(r, COL_ACCENT);
+    fill_rect(r, LX, help_y + 10, 4, 80);
+    if (focus >= 0 && focus < SET_COUNT && SETTING_HELP[focus]) {
+        SDL_Color c = { 0xec, 0xf2, 0xff, 0xff };
+        ui_text_draw_wrapped(r, LX + 28, help_y + 14, SCREEN_W - 2 * LX - 56, SETTING_HELP[focus],
+                             30, UI_FONT_REGULAR, c, 2);
     }
 
     /* Footer */
     set_color(r, COL_PANEL);
-    fill_rect(r, 0, FOOTER_Y, SCREEN_W, FOOTER_H);
+    fill_rect(r, 0, FOOT_Y, SCREEN_W, FOOT_H);
     set_color(r, COL_BORDER_DIM);
-    hline(r, 0, FOOTER_Y, SCREEN_W);
-    set_color(r, COL_TEXT_FAINT);
-    draw_text_centered(r, SCREEN_W / 2, FOOTER_Y + (FOOTER_H - 14) / 2,
-        "UP/DOWN: Navigate   LEFT/RIGHT: Change value   RED: Return", 2);
+    hline(r, 0, FOOT_Y, SCREEN_W);
+    set_color(r, COL_TEXT_DIM);
+    draw_text(r, 48, FOOT_Y + (FOOT_H - 14) / 2,
+              "Up/Down: move   Left/Right/OK: change   Back: return", 2);
+    if (msg && msg[0]) {
+        set_color(r, COL_SUCCESS);
+        draw_text(r, SCREEN_W - 48 - text_width(msg, 2), FOOT_Y + (FOOT_H - 14) / 2, msg, 2);
+    }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -1009,7 +750,7 @@ static void ui_render_settings_screen(SDL_Renderer *r,
 void ui_render_loading(SDL_Renderer *r, const char *base_text)
 {
     int sw = SCREEN_W, sh = SCREEN_H;
-    (void)SDL_GetRendererOutputSize(r, &sw, &sh);
+    ui_screen_size(r, &sw, &sh);
 
     SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
     set_color(r, COL_BG);
@@ -1052,8 +793,11 @@ void ui_render_loading(SDL_Renderer *r, const char *base_text)
     char msg[256];
     snprintf(msg, sizeof(msg), "%s%.*s", base_text, dot_count, "...");
 
+    /* Centre on the text with all three dots so it doesn't shift as they animate. */
     int msg_scale = 4;
-    int mw = text_width(msg, msg_scale);
+    char full[256];
+    snprintf(full, sizeof(full), "%s...", base_text);
+    int mw = text_width(full, msg_scale);
     set_color(r, COL_TEXT);
     draw_text(r, cx - mw / 2, cy + 70, msg, msg_scale);
 
@@ -1071,19 +815,22 @@ void ui_render_stats_overlay(SDL_Renderer *r, const char *text)
     if (!r || !text || !text[0]) return;
 
     int sw = SCREEN_W, sh = SCREEN_H;
-    (void)SDL_GetRendererOutputSize(r, &sw, &sh);
+    ui_screen_size(r, &sw, &sh);
 
     const int scale  = 2;
     const int pad    = 20;
-    const int line_h = 9 * scale;
+    ui_text_init(r);
+    const int line_h = ui_text_line_height(scale_px(scale));
 
-    /* Measure */
-    int lines = 1, maxw = 0, curw = 0;
-    for (const char *p = text; *p; p++) {
-        if (*p == '\n') { if (curw > maxw) maxw = curw; curw = 0; lines++; continue; }
-        curw += 6 * scale;
+    /* Measure (text_width measures up to the first '\n') */
+    int lines = 0, maxw = 0;
+    for (const char *p = text; p; ) {
+        int w = text_width(p, scale);
+        if (w > maxw) maxw = w;
+        lines++;
+        p = strchr(p, '\n');
+        if (p) p++;
     }
-    if (curw > maxw) maxw = curw;
 
     int box_w = maxw + pad * 2 + 8;  /* +8 for left accent bar */
     int box_h = lines * line_h + pad * 2;
@@ -1104,7 +851,7 @@ void ui_render_stats_overlay(SDL_Renderer *r, const char *text)
 
     /* Border */
     set_color(r, COL_BORDER);
-    draw_rect_outline(r, x, y, box_w, box_h);
+    stroke_rounded_rect(r, x, y, box_w, box_h, 12);
 
     /* Left accent bar */
     set_color(r, COL_ACCENT);
@@ -1128,7 +875,7 @@ void ui_render_hint(SDL_Renderer *r, const char *text, float opacity)
     if (!r || !text || !text[0] || opacity <= 0.0f) return;
 
     int sw = SCREEN_W, sh = SCREEN_H;
-    (void)SDL_GetRendererOutputSize(r, &sw, &sh);
+    ui_screen_size(r, &sw, &sh);
     (void)sh;
 
     const int scale = 2;
@@ -1211,6 +958,13 @@ static bool ui_write_settings_json(const char *config_path, const AppConfig *cfg
     SET_BOOL("sleep_on_exit", cfg->sleep_on_exit);
     SET_STR ("video_codec",   (cfg->video_codec && cfg->video_codec[0]) ? cfg->video_codec : "h265");
     SET_STR ("log_level",     ui_log_level_to_string(cfg->log_level));
+    SET_STR ("controller_profile", (cfg->controller_profile && cfg->controller_profile[0]) ? cfg->controller_profile : "auto");
+    SET_BOOL("rumble",             cfg->rumble);
+    SET_BOOL("dualsense_hid",      cfg->dualsense_hid);
+    SET_BOOL("motion",             cfg->motion);
+    SET_BOOL("trigger_effects",    cfg->trigger_effects);
+    SET_BOOL("dualsense_bt_patch", cfg->dualsense_bt_patch);
+    SET_BOOL("input_debug",        cfg->input_debug);
 
 #undef SET_INT
 #undef SET_BOOL
@@ -1274,7 +1028,7 @@ static void ui_apply_settings_indices(AppConfig *cfg,
  * ══════════════════════════════════════════════════════════════════════════ */
 
 static void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg,
-                             const char *config_path)
+                             const char *config_path, struct InputContext *input)
 {
     if (!renderer || !cfg) return;
 
@@ -1283,12 +1037,17 @@ static void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg,
     int br_idx    = ui_find_bitrate_idx(cfg);
     int codec_idx = ui_find_codec_idx(cfg);
     int log_idx   = ui_find_log_level_idx(cfg);
+    int profile_idx = 0;
+    for (int i = 0; i < N_PROFILES; i++)
+        if (cfg->controller_profile && !strcmp(cfg->controller_profile, PROFILE_OPTIONS[i])) profile_idx = i;
     int focus     = SET_RESOLUTION;
+    bool input_changed = false;
     char msg[256] = {0};
 
     bool wants_exit = false;
 
     while (1) {
+        pad_nav_poll(input);
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
             if (ev.type == SDL_QUIT) { wants_exit = true; continue; }
@@ -1310,7 +1069,15 @@ static void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg,
                     else if (focus == SET_CODEC)        { codec_idx = (codec_idx + (fwd?1:-1) + 3) % 3; changed = true; }
                     else if (focus == SET_LOG_LEVEL)    { log_idx   = (log_idx   + (fwd?1:-1) + 6) % 6; changed = true; }
                     else if (focus == SET_PS5)          { cfg->ps5         = !cfg->ps5;         changed = true; }
-                    else if (focus == SET_HW_DECODER)   { cfg->hw_decode   = !cfg->hw_decode;   changed = true; }
+                    else if (focus == SET_INPUT_DEBUG)  { cfg->input_debug = !cfg->input_debug; changed = input_changed = true; }
+                    else if (focus == SET_PROFILE)      { profile_idx = (profile_idx + (fwd?1:-1) + N_PROFILES) % N_PROFILES;
+                                                          free(cfg->controller_profile); cfg->controller_profile = strdup(PROFILE_OPTIONS[profile_idx]);
+                                                          changed = input_changed = true; }
+                    else if (focus == SET_RUMBLE)       { cfg->rumble = !cfg->rumble; changed = input_changed = true; }
+                    else if (focus == SET_DS_HID)       { cfg->dualsense_hid = !cfg->dualsense_hid; changed = input_changed = true; }
+                    else if (focus == SET_MOTION)       { cfg->motion = !cfg->motion; changed = input_changed = true; }
+                    else if (focus == SET_TRIGGERS)     { cfg->trigger_effects = !cfg->trigger_effects; changed = input_changed = true; }
+                    else if (focus == SET_BT_PATCH)     { cfg->dualsense_bt_patch = !cfg->dualsense_bt_patch; changed = input_changed = true; }
                     else if (focus == SET_WAKE_ON_START){ cfg->wakeup      = !cfg->wakeup;      changed = true; }
                     else if (focus == SET_SLEEP_ON_EXIT){ cfg->sleep_on_exit = !cfg->sleep_on_exit; changed = true; }
                     else if (focus == SET_RETURN)       { wants_exit = true; continue; }
@@ -1346,6 +1113,14 @@ static void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg,
          * batch, wait for any companion events, drain again, then return
          * cleanly to the launcher. */
         if (wants_exit) {
+            if (input_changed && input) {
+                InputOptions o = {
+                    .debug = cfg->input_debug, .profile_override = cfg->controller_profile,
+                    .rumble = cfg->rumble, .dualsense_hid = cfg->dualsense_hid, .motion = cfg->motion,
+                    .trigger_effects = cfg->trigger_effects, .dualsense_bt_patch = cfg->dualsense_bt_patch,
+                };
+                input_reconfigure(input, &o);
+            }
             SDL_Delay(150);
             SDL_PumpEvents();
             { SDL_Event _d; while (SDL_PollEvent(&_d)) {} }
@@ -1353,7 +1128,7 @@ static void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg,
         }
 
         ui_render_settings_screen(renderer, cfg, focus, msg,
-                                   res_idx, fps_idx, br_idx, codec_idx, log_idx);
+                                   res_idx, fps_idx, br_idx, codec_idx, log_idx, profile_idx);
         SDL_RenderPresent(renderer);
         SDL_Delay(16);
     }
@@ -1364,7 +1139,8 @@ static void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg,
  * ══════════════════════════════════════════════════════════════════════════ */
 
 UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
-                             const char *config_path, ChiakiLog *log)
+                             const char *config_path, ChiakiLog *log,
+                             struct InputContext *input)
 {
     (void)log;
 
@@ -1385,9 +1161,16 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
     if (ui_valid_ipv4(ip) && ui_has_keys(cfg))
         focus = 14;
 
-    SDL_StartTextInput();
+    /* Once per process: on webOS a second SDL_StartTextInput (launcher shown
+     * again after a stream) crashes in wl_proxy_marshal. */
+    static bool text_input_started;
+    if (!text_input_started) {
+        SDL_StartTextInput();
+        text_input_started = true;
+    }
 
     while (1) {
+        pad_nav_poll(input);
         /* Build lightweight debug status string */
         char status[256];
         snprintf(status, sizeof(status),
@@ -1428,6 +1211,7 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
                     } else {
                         if (focus == 13 || focus == 14) focus = 0;
                         else if (focus == 16)            focus = 13;
+                        else if (focus == 17)            focus = 14;
                     }
                 } else if (sym == SDLK_DOWN) {
                     if (editing) {
@@ -1438,7 +1222,8 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
                         }
                     } else {
                         if (focus == 0)               focus = 13;
-                        else if (focus == 13 || focus == 14) focus = 16;
+                        else if (focus == 13)            focus = 16;
+                        else if (focus == 14)            focus = 17;
                     }
                 } else if (sym == SDLK_LEFT) {
                     if (editing) {
@@ -1448,6 +1233,7 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
                         }
                     } else {
                         if (focus == 14) focus = 13;
+                        else if (focus == 17) focus = 16;
                     }
                 } else if (sym == SDLK_RIGHT) {
                     if (editing) {
@@ -1457,6 +1243,7 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
                         }
                     } else {
                         if (focus == 13) focus = 14;
+                        else if (focus == 16) focus = 17;
                     }
                 }
 
@@ -1535,14 +1322,18 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
                             ui_reload_cfg(cfg, config_path);
                             break;
                         }
+                    } else if (!editing && focus == 17) {
+                        ui_run_padtest(renderer, input);
+                        msg[0] = '\0';
                     } else if (!editing && focus == 16) {
                         /* Settings — drains Back events internally before returning */
-                        ui_run_settings(renderer, cfg, config_path);
+                        ui_run_settings(renderer, cfg, config_path, input);
                         ui_reload_cfg(cfg, config_path);
                         if (cfg && cfg->host && cfg->host[0])
                             snprintf(ip, sizeof(ip), "%s", cfg->host);
                         snprintf(msg, sizeof(msg), "Settings updated.");
-                        focus = (ui_has_keys(cfg) && ui_valid_ipv4(ip)) ? 14 : 0;
+                        /* Keep focus on Settings: jumping to Connect made a
+                         * second OK press start a session unexpectedly. */
                     } else if (!editing && focus == 14) {
                         /* Connect */
                         if (!ui_valid_ipv4(ip)) {
@@ -1592,7 +1383,7 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
         }
 
         render_setup_screen(renderer, status, ip, focus, msg,
-                             has_keys, can_import, can_connect, editing);
+                             has_keys, can_import, can_connect, editing, input);
         SDL_RenderPresent(renderer);
         SDL_Delay(16);
     }

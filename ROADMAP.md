@@ -215,10 +215,13 @@ Merged into **Stage 11** (DualSense USB audio), which shares the same USB audio 
 
 ## Stage 10: Settings UI, docs, release
 
-- [ ] Add a "Controller" section to the settings screen (`ui.c`): profile override, rumble, trigger effects, DualSense mode, input debug.
-- [ ] Optional: a gamepad-test screen in the launcher that shows live buttons, axes, touches and motion. It removes the need for a PS5 to verify mappings.
-- [ ] Update the README: supported-controller table, feature matrix (buttons / touch / motion / rumble / triggers / haptics per controller and connection type), troubleshooting with `[PAD]` log lines.
-- [ ] Bump the version in `packaging/appinfo.json` and tag a release.
+- [x] Add a "Controller" section to the settings screen (`ui.c`): profile override, rumble, trigger effects, DualSense mode, input debug. **(v0.5.0)** Also motion and the Bluetooth fix; changes apply on leaving the screen via `input_reconfigure()`.
+- [x] Optional: a gamepad-test screen in the launcher that shows live buttons, axes, touches and motion. **(v0.5.0, `ui_padtest.c`)** Also runs output tests (vibration, adaptive triggers, lightbar, player LEDs).
+- [x] **UI refresh (v0.5.0):** TrueType text with LG's fonts (`ui_text.c`, SDL2_ttf loaded at runtime, bitmap fallback); TV-sized launcher with step help and a live controller list; two-column settings with per-row help; gamepads navigate the menus (input starts before the launcher).
+- [x] Test the v0.5.0 UI on the TV: launcher, settings (each controller option), controller test (every button, touch, motion, each output test), navigation with remote and with a gamepad.
+  **Done (2026-11-17):** user confirmed buttons, touchpad, motion and every output test over USB and BT. Earlier, driven over SSH with injected remote keys + screen captures. Launcher, IP keypad, settings (change + save + Back) and the controller-test output buttons work (vibration, triggers, lightbar, player LEDs sent over BT, reset on exit). Fixed on the way: the BT fix was reported "unavailable" although it had applied (Homebrew Channel reply preceded by an `ld.so` LD_PRELOAD warning); colour macros inside `?:` gave a red status pill, pink focused labels and an always-orange controller dot; corners were drawn as a stepped cross; returning from Settings put focus on Connect (a second OK started a session); padtest info text overflowed. Still to check by hand: feel of each output, every button/touch/motion on the test screen, menu navigation with a gamepad, the real remote's Back key.
+- [x] Update the README: supported-controller table, feature matrix (buttons / touch / motion / rumble / triggers / haptics per controller and connection type), troubleshooting with `[PAD]` log lines.
+- [x] Bump the version in `packaging/appinfo.json` and tag a release. **(v0.5.0)**  Also in this release: Down-Down on the remote returns to the menu, a smooth loading spinner (wakeup on a worker thread, no wakeup when the PS5 is already on), USB preferred over Bluetooth when a DualSense is on both, and the UI scaled to the TV's real UI plane.
 
 ---
 
@@ -229,7 +232,9 @@ Merged into **Stage 11** (DualSense USB audio), which shares the same USB audio 
 **Bluetooth:** not planned. Over BT the pad carries audio in proprietary HID output reports. HD haptics over BT is possible in principle (it needs the btfix interrupt-channel path from Stage 7, at a much higher data rate) but is only partly reverse-engineered. There is no known open implementation of the BT microphone or speaker. Revisit only as an experiment once USB works.
 
 Tasks:
-- [ ] **Check first:** with the pad on USB, `/proc/asound/cards` lists it, and the app's user (uid 5131, group `audio`?) can open its `/dev/snd/pcmC*` devices. If the app can't, the options are elevated rights via the Homebrew Channel or dropping the stage.
+- [x] **Check first:** with the pad on USB, `/proc/asound/cards` lists it, and the app's user (uid 5131, group `audio`?) can open its `/dev/snd/pcmC*` devices. If the app can't, the options are elevated rights via the Homebrew Channel or dropping the stage.
+  **Result (2026-11-17):** passes. Card 2 `USB-Audio - DualSense Wireless Controller`; `/dev/snd/pcmC2D0p` and `pcmC2D0c` are `root:audio 660` and the app runs with group 29 (`audio`). Nothing else (PulseAudio) holds the card. Playback: S16_LE, **4 ch**, 48 kHz. Capture: S16_LE, **2 ch** (not mono), 48 kHz. 1 ms packets.
+  Side note: while plugged in, the pad also stays connected over Bluetooth, so it shows up twice (BT + USB evdev nodes, both opened).
 - [ ] Find the DualSense card (USB VID/PID `054c:0ce6` / `0df2`) and open it with ALSA (or SDL audio if SDL's ALSA backend sees it).
 - [ ] **Microphone:** capture 48 kHz mono in 480-sample (10 ms) frames, then send them to the PS5 with libchiaki: `chiaki_session_connect_microphone`, `ChiakiOpusEncoder` + `ChiakiAudioSender`. Follow chiaki-ng's `gui/src/streamsession.cpp`, which also uses speex echo cancellation.
 - [ ] **Mute button:** toggle the mic with `chiaki_session_toggle_microphone`, and drive the mute LED (output report byte 8 of the common block).

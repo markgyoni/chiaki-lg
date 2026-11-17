@@ -16,7 +16,8 @@ Streams PS4/PS5 Remote Play directly to your LG webOS TV.
 - **Hardware video decode** via webOS NDL (direct media pipeline) — video is decoded on a dedicated hardware plane below the app surface, not software-rendered
 - **Native Opus audio passthrough** — raw Opus packets fed directly to webOS NDL hardware decoder (no software decode step)
 - **Minimal built-in GUI** — a lightweight launcher screen on every launch lets you enter your PS5's IP, import your chiaki-ng config, adjust settings, and connect
-- **Full gamepad support** — DualSense, DualShock 4, Xbox Wireless Controller, and other Bluetooth/USB gamepads via direct evdev with exclusive grab (`EVIOCGRAB`)
+- **Full gamepad support** — DualSense (touchpad, motion, vibration, adaptive triggers, lightbar), Xbox Wireless Controller (with rumble), DualShock 4 and other Bluetooth/USB gamepads via direct evdev with exclusive grab (`EVIOCGRAB`); see [Gamepad support](#gamepad-support)
+- **Controller test screen** — see live what the PS5 receives and test vibration, triggers and lightbar
 - **chiaki-ng settings import** — drop a `chiaki-ng-Default.ini` export file onto the TV to auto-import registration credentials (PS5 IP still required)
 - **Wake-on-LAN** — wakes PS5 from rest mode before connecting (UDP broadcast + unicast)
 - **PSN cloud wakeup** — optional Sony push-notification wakeup via PSN session API when local UDP wakeup is unreliable (requires PSN refresh token)
@@ -64,10 +65,13 @@ Or transfer via [WebOS Dev Manager](https://github.com/webosbrew/dev-manager-des
 
 ### Step 4 — Launch and connect
 
-1. Launch **Chiaki-lg** on the TV
-2. Enter the local IP address of your PS5 and click **Import Config**. The `.ini` file is renamed to `.imported` after a successful import so it won't be reprocessed
-3. Open **Settings** and change anything as needed
-4. Select **Connect** — streaming starts immediately
+1. Launch **Chiaki-lg** on the TV. The right side of the start screen tells you what is still missing and lists your connected controllers.
+2. Enter the local IP address of your PS5 and select **Import keys**. The `.ini` file is renamed to `.imported` after a successful import so it won't be reprocessed
+3. Open **Settings** and change anything as needed (video, connection, controllers); a help line explains the selected option
+4. Optional: open **Controller test** to check every button, the touchpad, motion, vibration, adaptive triggers and the lightbar
+5. Select **Connect** — streaming starts immediately
+
+The menus work with the TV remote or a gamepad (D-pad/left stick to move, Cross to select, Circle to go back).
 
 > The `.ini` file does not contain your PS5's IP address. You must enter it manually before importing.
 
@@ -131,8 +135,8 @@ Most settings are managed through the in-app Settings screen. You can also edit 
 | `log_level` | string | `"warning"` | `"off"`, `"error"`, `"warning"`, `"info"`, `"verbose"`, `"debug"` |
 | `psn_refresh_token` | string | `""` | PSN OAuth2 refresh token for cloud wakeup (optional — see below) |
 | `controller_profile` | string | `"auto"` | Gamepad button/axis mapping. `"auto"` picks per controller from vendor ID and kernel driver. Overrides: `"sony_generic"` (DualSense/DS4 on the generic HID driver, the usual case on LG TVs), `"sony_kernel"`, `"xbox_bt"`, `"xpad"`, `"generic"`. The choice is logged as `profile=` in `/tmp/chiaki.log`. |
-| `rumble` | bool | `true` | Forward PS5 rumble to the controller. Works for Xbox pads over Bluetooth (raw HID) and pads whose kernel driver supports force feedback; DualSense rumble comes with the DualSense raw-HID backend. |
-| `dualsense_hid` | bool | `true` | Read a DualSense through its raw HID reports instead of the TV's generic driver. Needed for the touchpad (and later motion, rumble, adaptive triggers). Set `false` to fall back to plain buttons/sticks. |
+| `rumble` | bool | `true` | Forward PS5 vibration (rumble and the haptics stream, converted to rumble) to the controller: DualSense (USB, or Bluetooth with `dualsense_bt_patch`), Xbox pads over Bluetooth, and pads whose kernel driver supports force feedback. |
+| `dualsense_hid` | bool | `true` | Read a DualSense through its raw HID reports instead of the TV's generic driver. Needed for the touchpad, motion, vibration, adaptive triggers and the lightbar. Set `false` to fall back to plain buttons/sticks. |
 | `motion` | bool | `true` | Send DualSense gyro/accelerometer to the PS5 (motion aiming). Needs `dualsense_hid`. |
 | `trigger_effects` | bool | `true` | DualSense adaptive triggers. Needs `dualsense_hid`. |
 | `dualsense_bt_patch` | bool | `true` | Make DualSense rumble, adaptive triggers and lightbar work over **Bluetooth**. LG's Bluetooth stack sends controller output in a form the DualSense ignores (it only does it right for Xbox pads). On a **rooted** TV the app runs the bundled `btfix` helper through the Homebrew Channel, which fixes this in the running Bluetooth service's memory: nothing on disk changes, and a reboot undoes it. It only patches a known firmware build (webOS 6.5.3 / 03.53.45 so far) and refuses anything else. Without root, or with `false`, DualSense outputs work over USB only. The log shows `[BTFIX]`. |
@@ -151,17 +155,46 @@ Paste the value (beginning with `v3.`) into `psn_refresh_token` in `config.json`
 
 ## Gamepad support
 
-Connect a gamepad via Bluetooth or USB. Supported controllers include DualSense, DualShock 4, Xbox Wireless Controller, and most HID-compliant gamepads.
+Connect a gamepad via Bluetooth or USB, before or after launching the app (hot-plug works, also mid-stream). Up to four pads can be connected; their inputs are merged.
 
-The app uses direct evdev access with `EVIOCGRAB` to take exclusive control of the gamepad at the kernel level, preventing webOS from intercepting buttons (B→Back, A→OK, Guide→Home).
+The app reads gamepads directly from the kernel (evdev) and grabs them exclusively (`EVIOCGRAB`), so webOS can't steal buttons (B→Back, A→OK, Guide→Home). LG kernels have no `hid-playstation` driver, so a DualSense is additionally read through its raw HID reports, which is what makes the touchpad, motion and the DualSense outputs work.
+
+### Supported controllers
+
+| Controller | Connection | Layout (`profile=`) | Status |
+|---|---|---|---|
+| DualSense / DualSense Edge | Bluetooth | `sony_generic` | Tested |
+| DualSense / DualSense Edge | USB | `sony_generic` | Tested |
+| Xbox Series / One (BT firmware) | Bluetooth | `xbox_bt` | Tested |
+| Xbox / XInput pads | USB (`xpad`) | `xpad` | Mapping only, untested |
+| DualShock 4 | Bluetooth / USB | `sony_generic` or `sony_kernel` | Buttons and sticks, untested |
+| Other HID gamepads | Bluetooth / USB | `generic` (axes guessed) | Untested |
+
+### Features per controller
+
+| | DualSense (USB) | DualSense (Bluetooth) | Xbox (Bluetooth) | Others |
+|---|---|---|---|---|
+| Buttons, sticks, analog triggers | ✅ | ✅ | ✅ | ✅ |
+| Touchpad (touch, two fingers, click) | ✅ | ✅ | Click via **View + Menu** together | Click via **Select + Start** |
+| Motion (gyro aiming) | ✅ | ✅ | — | — |
+| Vibration (incl. PS5 haptics → rumble) | ✅ | ✅ with the Bluetooth fix¹ | ✅ | If the kernel driver supports force feedback |
+| Adaptive triggers | ✅ | ✅ with the Bluetooth fix¹ | — | — |
+| Lightbar / player LEDs | ✅ | ✅ with the Bluetooth fix¹ | — | — |
+| HD haptics, microphone, headset jack | Planned (ROADMAP Stage 11) | — | — | — |
+
+¹ DualSense outputs over Bluetooth need the in-memory Bluetooth fix (`dualsense_bt_patch`, see the config reference): a rooted TV with the Homebrew Channel and a known firmware build (webOS 6.5.3 / 03.53.45 so far). Without it, use USB for vibration, triggers and the lightbar. The launcher and the controller test show which outputs are active for each pad.
+
+PS5 games mostly send vibration as a haptics audio stream; the app turns it into normal rumble for every pad that can vibrate.
+
+Use **Controller test** in the launcher to check a pad: it shows exactly what the PS5 will receive (buttons, sticks, triggers, touches, motion) and can test vibration, adaptive triggers, the lightbar and player LEDs. Hold **PS** for 2 s to leave it with the controller.
 
 The TV remote is not forwarded to the PS5 as controller input. During streaming it serves only:
 
 | TV Remote Button | Action |
 |---|---|
-| **Up** (hold 0.5 s) | Toggle stats overlay |
-| **Up** (short press) | Forwarded to PS5 as D-pad up |
-| **Back** | Exit the app |
+| **Up** | Toggle stats overlay |
+| **Down** twice (within 0.7 s) | Leave the stream and go back to the menu |
+| **Back** | Exit the app (while the stream is still connecting: cancel and go back to the menu) |
 | **Home** | Exit the app |
 
 ---
@@ -211,6 +244,22 @@ Add your `psn_refresh_token` to `config.json` to enable PSN cloud wakeup (see ab
 
 **Gamepad buttons intercepted by webOS**
 Check logs for `EVIOCGRAB FAILED`. Disconnect and reconnect the controller after launching the app.
+
+**Controller not detected, or buttons mixed up**
+Every launch logs one `[PAD]` line per input device, e.g.
+
+```
+[PAD] /dev/input/event13 "DualSense Wireless Controller" bus=0x05 vid=054c pid=0ce6 driver=hid-generic
+[INPUT] Opened gamepad: "DualSense Wireless Controller" ... profile=sony_generic (PlayStation pad on hid-generic)
+```
+
+`bus=0x05` is Bluetooth, `0x03` USB. If your pad has a `[PAD]` line but no `Opened gamepad`, it lacks a south button plus left stick, or has no kernel driver (`driver=(none)`); please open an issue with the log. If buttons are swapped, try another **Button layout** in Settings (`controller_profile`) and report which one works. Turn on **Controller debug log** (`input_debug`) to log every raw button/axis event as `[PADEV]`.
+
+**DualSense: no vibration / triggers / lightbar over Bluetooth**
+Look for the `[BTFIX]` line. `active` means the fix is applied; `unavailable: ...` gives the reason (not rooted, unknown firmware, Homebrew Channel missing). The `[INPUT] ... DualSense outputs` line says what is enabled per pad. Over USB the outputs always work.
+
+**DualSense: no touchpad or motion**
+Needs `"dualsense_hid": true`. The log should show `DualSense raw HID backend on` and `DualSense full reports active`. If `[HID]` lines say `open ... failed`, the app can't read the controller's raw HID node.
 
 **Import not working / file not found**
 Ensure the file is named exactly `chiaki-ng-Default.ini` and placed in:
