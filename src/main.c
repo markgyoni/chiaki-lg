@@ -41,6 +41,7 @@
 #include "stats.h"
 #include "config_import.h"
 
+
 #define APP_DIR     "/media/developer/apps/usr/palm/applications/org.homebrew.chiaki"
 #define CONFIG_PATH APP_DIR "/config.json"
 #define LOG_PATH    "/tmp/chiaki.log"
@@ -53,6 +54,7 @@ static volatile bool g_should_exit   = false;
 static volatile bool g_session_ended = false;
 static volatile ChiakiQuitReason g_quit_reason = CHIAKI_QUIT_REASON_NONE;
 static volatile bool g_ps5_sleeping  = false;  // PS5 initiated Rest Mode
+static volatile bool g_stream_refused = false; // console couldn't start the video stream
 static InputContext *volatile g_input_ctx = NULL;  // for rumble from session_event_cb
 
 static ChiakiSession  g_session;
@@ -173,6 +175,12 @@ static void session_event_cb(ChiakiEvent *event, void *user)
                 event->quit.reason_str ? event->quit.reason_str : "(none)");
         g_quit_reason  = event->quit.reason;
         g_session_ended = true;
+        // The console could not start its video encoder for what we asked
+        // (e.g. a resolution it doesn't stream).  Retrying can't help.
+        if (event->quit.reason_str &&
+            (strstr(event->quit.reason_str, "AvCap failed") ||
+             strstr(event->quit.reason_str, "Nagare did not init")))
+            g_stream_refused = true;
         // Detect PS5 Rest Mode via reason_str (no dedicated enum in this chiaki-ng version).
         // When the PS5 enters Rest Mode mid-stream it sends "Server shutting down".
         // Set flags so the event loop exits and we do not reconnect.
@@ -1534,6 +1542,7 @@ int main(int argc, char *argv[])
             g_session_ended = false;
             g_quit_reason   = CHIAKI_QUIT_REASON_NONE;
             g_ps5_sleeping  = false;
+            g_stream_refused = false;
             g_have_video_frame = false;
 
             stats_reset(&g_stream_stats);
@@ -1575,6 +1584,7 @@ int main(int argc, char *argv[])
                 haptics_sink.frame_cb = haptics_frame_cb;
                 chiaki_session_set_haptics_sink(&g_session, &haptics_sink);
             }
+
 
             err = chiaki_session_start(&g_session);
             if (err != CHIAKI_ERR_SUCCESS)
@@ -1671,6 +1681,7 @@ int main(int argc, char *argv[])
                 if (g_session_ended || g_should_exit)
                     break;
 
+
                 // Until the first video sample: opaque loading screen.  Then
                 // transparent frames so the NDL plane underneath shows through.
                 if (!g_have_video_frame)
@@ -1744,9 +1755,24 @@ int main(int argc, char *argv[])
             }
             chiaki_session_stop(&g_session);
             chiaki_session_join(&g_session);
+
             chiaki_session_fini(&g_session);
 
             // ── Reconnect decision ────────────────────────────────────────────
+            if (g_stream_refused && !g_should_exit)
+            {
+                // Same request would fail again: back to the menu and say why.
+                app_log_always("[APP] The console refused to start the video stream (%dx%d@%d, %s) — back to the menu\n",
+                               cfg.video_width, cfg.video_height, cfg.video_fps,
+                               cfg.video_codec ? cfg.video_codec : "?");
+                char notice[200];
+                snprintf(notice, sizeof(notice),
+                         "Connection failed: the console could not start a %dx%d stream. "
+                         "Try a lower resolution or H.264 in Settings.", cfg.video_width, cfg.video_height);
+                ui_set_launcher_notice(notice);
+                g_return_to_menu = true;
+                break;
+            }
             if (!g_should_exit && !g_return_to_menu && should_reconnect(g_quit_reason))
             {
                 // "Remote Play already in use" right after leaving a stream:

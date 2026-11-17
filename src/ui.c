@@ -510,13 +510,13 @@ static const char *PROFILE_LABELS[]  = {"Automatic", "PlayStation (HID)", "PlayS
 
 /* One line of help per setting, shown under the list for the focused row. */
 static const char *SETTING_HELP[SET_COUNT] = {
-    [SET_RESOLUTION]    = "Stream resolution. 1080p suits most TVs; 2160p needs a fast network.",
+    [SET_RESOLUTION]    = "Stream resolution. The PS5 streams Remote Play at up to 1080p; the TV upscales it.",
     [SET_FPS]           = "60 fps feels much smoother; 30 fps uses half the bandwidth.",
     [SET_BITRATE]       = "Higher looks sharper but needs a stronger network. Lower it if the picture stutters.",
     [SET_CODEC]         = "H.265 gives better quality per bit. Use H.265 HDR for HDR games on an HDR TV.",
     [SET_PS5]           = "On for a PS5, off for a PS4 (PS4 streams always use H.264).",
     [SET_WAKE_ON_START] = "Wake the console from rest mode when you press Connect.",
-    [SET_SLEEP_ON_EXIT] = "Put the console into rest mode when you leave the stream.",
+    [SET_SLEEP_ON_EXIT] = "Put the console into rest mode when you close the app.",
     [SET_LOG_LEVEL]     = "How much is written to /tmp/chiaki.log. Warning is enough unless you are debugging.",
     [SET_INPUT_DEBUG]   = "Log every raw controller event. Only for diagnosing controller problems.",
     [SET_PROFILE]       = "Button layout. Automatic picks the right one for each controller.",
@@ -534,8 +534,8 @@ typedef struct { int w, h; const char *label; } ResOption;
 static const ResOption RES_OPTIONS[] = {
     {1280, 720,  "720p"},
     {1920, 1080, "1080p"},
-    {2560, 1440, "1440p"},
-    {3840, 2160, "2160p"},
+    /* No 1440p/2160p: the PS5 streams Remote Play at up to 1080p and refuses
+     * larger sizes ("AvCap failed to initialize video"). */
 };
 static const int FPS_OPTIONS[]    = {30, 60};
 static const int BITRATE_OPTIONS[] = {5000, 10000, 15000, 25000, 35000, 45000};
@@ -1138,6 +1138,13 @@ static void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg,
  * Main registration / launcher UI
  * ══════════════════════════════════════════════════════════════════════════ */
 
+static char g_notice[256];
+
+void ui_set_launcher_notice(const char *text)
+{
+    snprintf(g_notice, sizeof(g_notice), "%s", text ? text : "");
+}
+
 UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
                              const char *config_path, ChiakiLog *log,
                              struct InputContext *input)
@@ -1156,6 +1163,10 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
     int  focus   = 0;
     bool editing = false;
     char msg[256] = {0};
+    if (g_notice[0]) {
+        snprintf(msg, sizeof(msg), "%s", g_notice);
+        g_notice[0] = '\0';
+    }
 
     /* Start with Connect focused if already ready */
     if (ui_valid_ipv4(ip) && ui_has_keys(cfg))
