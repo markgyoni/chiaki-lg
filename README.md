@@ -131,6 +131,7 @@ Most settings are managed through the in-app Settings screen. You can also edit 
 | `log_level` | string | `"warning"` | `"off"`, `"error"`, `"warning"`, `"info"`, `"verbose"`, `"debug"` |
 | `psn_refresh_token` | string | `""` | PSN OAuth2 refresh token for cloud wakeup (optional — see below) |
 | `controller_profile` | string | `"auto"` | Gamepad button/axis mapping. `"auto"` picks per controller from vendor ID and kernel driver. Overrides: `"sony_generic"` (DualSense/DS4 on the generic HID driver, the usual case on LG TVs), `"sony_kernel"`, `"xbox_bt"`, `"xpad"`, `"generic"`. The choice is logged as `profile=` in `/tmp/chiaki.log`. |
+| `rumble` | bool | `true` | Forward PS5 rumble to the controller. Works for Xbox pads over Bluetooth (raw HID) and pads whose kernel driver supports force feedback; DualSense rumble comes with the DualSense raw-HID backend. |
 | `input_debug` | bool | `false` | Log every raw gamepad event (`[PADEV]`) and sample raw HID reports at startup. Controller capabilities (`[PAD]`/`[HID]`) are always logged. |
 
 ### PSN cloud wakeup (optional)

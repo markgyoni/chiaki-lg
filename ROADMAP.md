@@ -113,15 +113,20 @@ every face button, L1/R1, analog L2/R2 (full 0–255 travel), L3/R3, Create/Shar
 ## Stage 3: Standard rumble (Xbox, DS4 on the kernel driver)
 
 **Why:** the PS5 sends `CHIAKI_EVENT_RUMBLE`, and today `main.c` ignores it.
+
 **Stage 1 finding:** the Xbox Series pad on webOS 6 is driven by hid-generic too and has **no** `EV_FF`, so on this TV Xbox rumble also needs a raw HID output report (Xbox BT report `0x03`: enable mask, left/right trigger motors, strong/weak motors, duration, delay, repeat). Evdev FF stays as the path for pads whose driver supports it.
 
-- [ ] Open pads with `O_RDWR`; currently `O_RDONLY`, which blocks force-feedback writes.
-- [ ] For pads with `EV_FF` + `FF_RUMBLE`: upload one `ff_effect` with `EVIOCSFF`, then update and play it by writing `EV_FF` events. Scale `left` → strong magnitude and `right` → weak magnitude (`u8 → u16`).
-- [ ] Route `CHIAKI_EVENT_RUMBLE` from `session_event_cb`, which runs on a chiaki thread, to a new `input_set_rumble(ctx, left, right)`. Store the values and let the input thread apply them, with no blocking I/O in the callback.
-- [ ] Stop rumble on session end and app exit.
-- [ ] Add a `"rumble": true` config toggle.
+- [x] Open pads with `O_RDWR`; currently `O_RDONLY`, which blocks force-feedback writes.
+- [x] For pads with `EV_FF` + `FF_RUMBLE`: upload one `ff_effect` with `EVIOCSFF`, then update and play it by writing `EV_FF` events. Scale `left` → strong magnitude and `right` → weak magnitude (`u8 → u16`).
+- [x] Route `CHIAKI_EVENT_RUMBLE` from `session_event_cb`, which runs on a chiaki thread, to a new `input_set_rumble(ctx, left, right)`. Store the values and let the input thread apply them, with no blocking I/O in the callback.
+- [x] Stop rumble on session end and app exit.
+- [x] Add a `"rumble": true` config toggle.
+- [x] Xbox over Bluetooth on hid-generic: raw HID output report `0x03` on the sibling `/dev/hidrawN`, re-sent every second while active (the report has a 2.55 s duration). `src/pad_output.c`.
+- [x] **Fix after first TV test (v0.2.0):** no rumble at all — the PS5 sent zero rumble packets to a "DualShock 4" client. Now, like chiaki-ng, a PS5 session announces a DualSense (`enable_dualsense`) and the haptics audio stream is converted to motor rumble (pulled forward from Stages 7/8). Classic rumble events are still used when they arrive.
+- [ ] DualSense/DS4 on hid-generic: deferred to Stage 7. Any output report switches a BT Sony pad to full input reports, which hid-generic cannot map, so it needs the Stage 4 hidraw input backend first. - [ ] DualSense/DS4 on hid-generic: deferred to Stage 7 — any output report switches a BT Sony pad to full input reports, which hid-generic cannot map, so it needs the Stage 4 hidraw input backend first.
 
 **Done when:** an Xbox pad (BT/USB) and a DS4 (if it uses the `sony` driver) vibrate in a game, and the vibration stops on disconnect.
+**Status (2026-11-16, v0.2.1):** passed on the TV with the Xbox Series pad over BT (haptics→rumble, stops with the effect). DualSense rumble follows in Stage 7.  **Side fix found while testing (v0.2.1–0.2.2):** HDR sessions looked dim because the app never told NDL the stream is HDR10. v0.2.2 sends HDR10 metadata via `SS4S_PlayerVideoSetHDRInfo`, retried until NDL has loaded the media.
 
 ---
 

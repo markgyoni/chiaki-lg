@@ -134,7 +134,30 @@ add_executable(chiaki-webos
     src/stats.c
     src/pad_diag.c
     src/pad_profile.c
+    src/pad_output.c
 )
+
+# ── Version ───────────────────────────────────────────────────────────────────
+# Single source of truth: "version" in packaging/appinfo.json.  The git
+# revision comes from $CHIAKI_LG_GIT (set by the build wrapper, since the WSL
+# build copy has no .git) or from git itself.
+file(READ "${CMAKE_SOURCE_DIR}/packaging/appinfo.json" _appinfo)
+string(REGEX MATCH "\"version\"[ \t]*:[ \t]*\"([^\"]+)\"" _m "${_appinfo}")
+set(APP_VERSION "${CMAKE_MATCH_1}")
+if(DEFINED ENV{CHIAKI_LG_GIT} AND NOT "$ENV{CHIAKI_LG_GIT}" STREQUAL "")
+    set(APP_GIT "$ENV{CHIAKI_LG_GIT}")
+else()
+    execute_process(COMMAND git describe --always --dirty
+                    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+                    OUTPUT_VARIABLE APP_GIT OUTPUT_STRIP_TRAILING_WHITESPACE
+                    ERROR_QUIET)
+    if(NOT APP_GIT)
+        set(APP_GIT "unknown")
+    endif()
+endif()
+message(STATUS "chiaki-lg version ${APP_VERSION} (${APP_GIT})")
+target_compile_definitions(chiaki-webos PRIVATE
+    APP_VERSION="${APP_VERSION}" APP_GIT="${APP_GIT}")
 
 # Standalone controller diagnostics CLI (run over SSH on the TV; see tools/paddiag.c)
 add_executable(paddiag tools/paddiag.c src/pad_diag.c)

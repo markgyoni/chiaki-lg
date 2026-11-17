@@ -52,6 +52,7 @@ static volatile bool g_should_exit   = false;
 static volatile bool g_session_ended = false;
 static volatile ChiakiQuitReason g_quit_reason = CHIAKI_QUIT_REASON_NONE;
 static volatile bool g_ps5_sleeping  = false;  // PS5 initiated Rest Mode
+static InputContext *volatile g_input_ctx = NULL;  // for rumble from session_event_cb
 
 static ChiakiSession  g_session;
 static SDL_Window    *g_window   = NULL;
@@ -140,6 +141,8 @@ static void session_event_cb(ChiakiEvent *event, void *user)
             (const uint8_t *)"0000", 4);
         break;
     case CHIAKI_EVENT_RUMBLE:
+        // left = low-frequency (strong) motor, right = high-frequency (weak)
+        input_set_rumble(g_input_ctx, event->rumble.left, event->rumble.right);
         break;
     case CHIAKI_EVENT_QUIT:
         // Log the reason so we can diagnose what triggered the disconnect.
@@ -166,6 +169,25 @@ static void session_event_cb(ChiakiEvent *event, void *user)
     default:
         break;
     }
+}
+
+// SS4S / NDL internal logging → our log (info and above; NDL only logs
+// lifecycle events at info, nothing per frame).
+static void ss4s_log_cb(SS4S_LogLevel level, const char *tag, const char *fmt, ...)
+{
+    if (level > SS4S_LogLevelInfo) return;
+    char msg[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+    app_log_always("[SS4S/%s] %s\n", tag ? tag : "?", msg);
+}
+
+// PS5 haptics audio (DualSense mode) → controller rumble, see input.c.
+static void haptics_frame_cb(uint8_t *buf, size_t buf_size, void *user)
+{
+    input_push_haptics((InputContext *)user, buf, buf_size);
 }
 
 // ── Signal handler ────────────────────────────────────────────────────────────
@@ -976,6 +998,7 @@ int main(int argc, char *argv[])
         char tbuf[64];
         strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S", localtime(&t));
         app_log("\n\n========== NEW LAUNCH %s ==========\n", tbuf);
+        app_log_always("[APP] chiaki-lg v%s (%s)\n", APP_VERSION, APP_GIT);
     }
 
     app_log("[APP] SS4S_MODULE=%s\n",      getenv("SS4S_MODULE"));
@@ -1149,6 +1172,7 @@ int main(int argc, char *argv[])
     SS4S_Config ss4s_cfg = {
         .audioDriver = cfg.ss4s_module,
         .videoDriver = cfg.ss4s_module,
+        .loggingFunction = ss4s_log_cb,
     };
     SS4S_Init(argc, argv, &ss4s_cfg);
     SS4S_PostInit(argc, argv);
@@ -1237,7 +1261,13 @@ int main(int argc, char *argv[])
     }
     app_log("[APP] audio_init OK\n");
 
-    InputContext *input_ctx = input_init(cfg.input_debug, cfg.controller_profile);
+    InputOptions input_opt = {
+        .debug = cfg.input_debug,
+        .profile_override = cfg.controller_profile,
+        .rumble = cfg.rumble,
+    };
+    InputContext *input_ctx = input_init(&input_opt);
+    g_input_ctx = input_ctx;
 
     // ── Build connect info (done once, reused across reconnects) ──────────────
     ChiakiConnectInfo info;
@@ -1280,6 +1310,12 @@ int main(int argc, char *argv[])
     info.video_profile.bitrate = cfg.video_bitrate;
 
     info.video_profile.codec = requested_codec;
+
+    // Announce a DualSense to a PS5 (as chiaki-ng does).  PS5 games then send
+    // vibration as a haptics audio stream instead of classic rumble packets
+    // (which a "DualShock 4" client mostly never gets), plus trigger effects.
+    // The haptics stream is converted to motor rumble in input.c.
+    info.enable_dualsense = cfg.ps5;
 
     // ── Session / reconnect loop ──────────────────────────────────────────────
     // We stay inside this loop until the user deliberately exits (Home button,
@@ -1428,6 +1464,13 @@ int main(int argc, char *argv[])
                 (void *)audio_sink.header_cb,
                 (void *)audio_sink.frame_cb,
                 audio_sink.user);
+
+        if (info.enable_dualsense) {
+            ChiakiAudioSink haptics_sink = { 0 };
+            haptics_sink.user     = input_ctx;
+            haptics_sink.frame_cb = haptics_frame_cb;
+            chiaki_session_set_haptics_sink(&g_session, &haptics_sink);
+        }
 
         err = chiaki_session_start(&g_session);
         if (err != CHIAKI_ERR_SUCCESS)
@@ -1613,6 +1656,7 @@ int main(int argc, char *argv[])
     }
 
 cleanup_session_ctx:
+    g_input_ctx = NULL;
     input_fini(input_ctx);
     audio_fini(audio_ctx);
     video_fini(video_ctx);

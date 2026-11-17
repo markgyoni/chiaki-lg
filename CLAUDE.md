@@ -24,6 +24,10 @@ Output: `build-webos/*.ipk`. Install with `ares-install --device myTV build-webo
 
 Host gotchas seen on Debian 13 WSL with buildroot-nc4 `webos-a38c582`: the SDK's bundled `cmake` needs `libssl.so.1.1` (replace `bin/cmake` with a pip-installed `cmake<4`; CMake 4 breaks old deps), chiaki-ng's `lib/protobuf` needs a host `protoc` at configure time, and `relocate-sdk.sh` needs the `file` command. Without `ares-package` on PATH the script stops after staging `build-webos/ipk-staging`.
 
+## Versioning
+
+The version lives only in `packaging/appinfo.json` (`version`). CMake embeds it plus the git revision (`$CHIAKI_LG_GIT` from the WSL build wrapper, else `git describe --always --dirty`) as `APP_VERSION`/`APP_GIT`; the launcher header shows `vX.Y.Z (rev)` and the log starts with `[APP] chiaki-lg vX.Y.Z (rev)`. Scheme: `0.MINOR.PATCH` — bump MINOR when a ROADMAP stage is completed, PATCH for fixes in between; tag releases `vX.Y.Z`.
+
 ## Dev loop on a rooted TV
 
 - `tools/deploy-tv.sh <ssh-host> [staging-dir]` copies a build into the app dir over SSH (root), preserving `config.json` and credentials. Reinstalling an IPK replaces the app dir and loses them.
