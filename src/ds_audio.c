@@ -2,6 +2,7 @@
 #include "app_log.h"
 
 #include <alsa/asoundlib.h>
+#include <math.h>
 #include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -37,6 +38,13 @@ struct DsAudio {
     unsigned long   dropped;
 
     bool            mic_on;
+    float           mic_level;       /* RMS of the last mic frame, 0..1 */
+    unsigned        mic_frames, mic_errors;
+
+    /* test tone (controller test screen): channel mask, frames left, phase */
+    int             test_mask;
+    long            test_left;
+    double          test_phase;
     DsAudioMicCb    mic_cb;
     void           *mic_user;
 
@@ -165,6 +173,19 @@ static void *play_main(void *arg)
         }
         a->ring_head = (a->ring_head + n) % RING_FRAMES;
         a->ring_count -= n;
+        if (a->test_left > 0) {
+            /* 150 Hz for the actuators (felt), 660 Hz for the speaker (heard) */
+            double f = (a->test_mask & 0x3) ? 660.0 : 150.0;
+            long m = a->test_left < CHUNK_FRAMES ? a->test_left : CHUNK_FRAMES;
+            for (long i = 0; i < m; i++) {
+                int16_t v = (int16_t)(14000.0 * sin(a->test_phase));
+                a->test_phase += 2.0 * M_PI * f / RATE;
+                if (a->test_phase > 2.0 * M_PI) a->test_phase -= 2.0 * M_PI;
+                for (int ch = 0; ch < OUT_CHANNELS; ch++)
+                    if (a->test_mask & (1 << ch)) chunk[i * OUT_CHANNELS + ch] = v;
+            }
+            a->test_left -= m;
+        }
         pthread_mutex_unlock(&a->lock);
 
         snd_pcm_sframes_t w = snd_pcm_writei(pcm, chunk, CHUNK_FRAMES);   /* paces the loop */
@@ -232,11 +253,18 @@ static void *cap_main(void *arg)
         snd_pcm_sframes_t r = snd_pcm_readi(pcm, buf, DS_AUDIO_MIC_FRAMES);
         if (r == DS_AUDIO_MIC_FRAMES) {
             frames++;
+            double sum = 0;
+            for (int i = 0; i < DS_AUDIO_MIC_FRAMES * MIC_CHANNELS; i++) sum += (double)buf[i] * buf[i];
             pthread_mutex_lock(&a->lock);
             bool on = a->mic_on;
+            a->mic_level = (float)(sqrt(sum / (DS_AUDIO_MIC_FRAMES * MIC_CHANNELS)) / 32768.0);
+            a->mic_frames++;
             pthread_mutex_unlock(&a->lock);
             if (on && a->mic_cb) a->mic_cb(buf, a->mic_user);
         } else if (r < 0) {
+            pthread_mutex_lock(&a->lock);
+            a->mic_errors++;
+            pthread_mutex_unlock(&a->lock);
             if (snd_pcm_recover(pcm, (int)r, 1) < 0) {
                 app_log_always("[DSAUDIO] microphone error: %s — closing\n", snd_strerror((int)r));
                 snd_pcm_close(pcm);
@@ -348,4 +376,25 @@ void ds_audio_mic_enable(DsAudio *a, bool on)
     a->mic_on = on;
     pthread_cond_broadcast(&a->cond);
     pthread_mutex_unlock(&a->lock);
+}
+
+void ds_audio_test_tone(DsAudio *a, int channel_mask, int ms)
+{
+    if (!a) return;
+    pthread_mutex_lock(&a->lock);
+    a->test_mask = channel_mask;
+    a->test_left = (long)RATE * ms / 1000;
+    pthread_mutex_unlock(&a->lock);
+    app_log_always("[DSAUDIO] test tone on channels 0x%x for %d ms (haptics output %s)\n",
+                   channel_mask, ms, a->haptics_open ? "open" : "NOT open");
+}
+
+int ds_audio_mic_state(DsAudio *a, float *level)
+{
+    if (!a) return -1;
+    pthread_mutex_lock(&a->lock);
+    int st = a->card < 0 ? -1 : !a->mic_on ? 0 : a->mic_frames > 0 ? 2 : a->mic_errors > 0 ? -2 : 1;
+    if (level) *level = a->mic_level;
+    pthread_mutex_unlock(&a->lock);
+    return st;
 }

@@ -37,3 +37,11 @@ void ds_audio_push_haptics(DsAudio *a, const uint8_t *buf, size_t size);
 
 /* Start/stop microphone capture (the callback only runs while enabled). */
 void ds_audio_mic_enable(DsAudio *a, bool on);
+
+/* Controller test: a sine on the given output channels (bit 0 = ch 1 ...
+ * 0x3 speaker/headset at 660 Hz, 0xc haptic actuators at 150 Hz). */
+void ds_audio_test_tone(DsAudio *a, int channel_mask, int ms);
+
+/* Microphone state: -1 no card, 0 off, 1 opening/no data yet, 2 receiving
+ * (level = RMS 0..1 of the last 10 ms), -2 the card returns no data (errors). */
+int  ds_audio_mic_state(DsAudio *a, float *level);

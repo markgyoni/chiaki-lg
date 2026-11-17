@@ -1,4 +1,5 @@
 #include "ui_padtest.h"
+#include "ds_audio.h"
 #include "ui_text.h"
 #include "input.h"
 
@@ -238,7 +239,7 @@ static void draw_info(SDL_Renderer *r, struct InputContext *in, const ChiakiCont
 
 /* ── output tests ────────────────────────────────────────────────────────── */
 
-enum { T_RUMBLE, T_TRIGGERS, T_LIGHTBAR, T_PLAYER, T_DONE, T_COUNT };
+enum { T_RUMBLE, T_HAPTICS, T_SPEAKER, T_TRIGGERS, T_LIGHTBAR, T_PLAYER, T_DONE, T_COUNT };
 
 static const SDL_Color LIGHTBAR_COLOURS[] = {
     { 0xff, 0x00, 0x00, 0xff }, { 0x00, 0xff, 0x00, 0xff }, { 0x00, 0x40, 0xff, 0xff },
@@ -257,24 +258,52 @@ static void set_triggers(struct InputContext *in, bool resist)
 static void draw_tests(SDL_Renderer *r, int focus, bool triggers_on, int light_idx, int player)
 {
     const int Y = 880, BH = 86, GAP = 22, X0 = 60;
-    const int BW = (W - 2 * X0 - 4 * GAP) / 5;
+    const int BW = (W - 2 * X0 - (T_COUNT - 1) * GAP) / T_COUNT;
     char lbl[T_COUNT][48];
     snprintf(lbl[T_RUMBLE], 48, "Vibrate");
+    snprintf(lbl[T_HAPTICS], 48, "HD haptics");
+    snprintf(lbl[T_SPEAKER], 48, "Speaker");
     snprintf(lbl[T_TRIGGERS], 48, "Triggers: %s", triggers_on ? "on" : "off");
-    snprintf(lbl[T_LIGHTBAR], 48, "Lightbar: %s", light_idx < 0 ? "-" : LIGHTBAR_NAMES[light_idx]);
-    snprintf(lbl[T_PLAYER], 48, "Player LEDs: %d", player);
+    snprintf(lbl[T_LIGHTBAR], 48, "Light: %s", light_idx < 0 ? "-" : LIGHTBAR_NAMES[light_idx]);
+    snprintf(lbl[T_PLAYER], 48, "LEDs: %d", player);
     snprintf(lbl[T_DONE], 48, "Done");
     for (int i = 0; i < T_COUNT; i++) {
         int x = X0 + i * (BW + GAP);
         if (i == focus) { col(r, C_TEXT); rrect(r, x - 4, Y - 4, BW + 8, BH + 8, 18); }
         col(r, i == focus ? C_ACCENT : C_BODY); rrect(r, x, Y, BW, BH, 14);
-        text(r, x + BW / 2, Y + (BH - ui_text_line_height(32)) / 2, lbl[i], 32, UI_FONT_SEMIBOLD,
+        text(r, x + BW / 2, Y + (BH - ui_text_line_height(30)) / 2, lbl[i], 30, UI_FONT_SEMIBOLD,
              C_TEXT, UI_ALIGN_CENTER);
     }
 }
 
-/* ── screen loop ─────────────────────────────────────────────────────────── */
+/* USB audio status above the test buttons (HD haptics, speaker, microphone). */
+static void draw_audio_status(SDL_Renderer *r, DsAudio *a)
+{
+    char s[200];
+    float lvl = 0;
+    int mic = ds_audio_mic_state(a, &lvl);
+    SDL_Color c = C_DIM;
+    if (!ds_audio_card_present(a)) {
+        snprintf(s, sizeof(s), "USB audio: connect the DualSense by USB for HD haptics, speaker and microphone");
+    } else {
+        const char *out = ds_audio_haptics_active(a) ? "output open" : "output NOT open";
+        if (mic == 2) {
+            int bars = (int)(lvl * 400.0f);
+            if (bars > 20) bars = 20;
+            char meter[24];
+            for (int i = 0; i < 20; i++) meter[i] = i < bars ? '|' : '.';
+            meter[20] = '\0';
+            snprintf(s, sizeof(s), "USB audio: %s   |   Microphone: receiving  %s", out, meter);
+        } else {
+            snprintf(s, sizeof(s), "USB audio: %s   |   Microphone: %s", out,
+                     mic == -2 ? "no data (TV USB capture error)" : "starting...");
+            if (mic == -2) c = C_WARN;
+        }
+    }
+    ui_text_draw_fit(r, 60, 830, 1110, s, 26, UI_FONT_REGULAR, c);   /* left of the info panel */
+}
 
+/* ── screen loop ─────────────────────────────────────────────────────────── */
 void ui_run_padtest(SDL_Renderer *r, struct InputContext *in)
 {
     if (!r) return;
@@ -282,6 +311,9 @@ void ui_run_padtest(SDL_Renderer *r, struct InputContext *in)
     int focus = T_RUMBLE, light_idx = -1, player = 0;
     bool triggers_on = false;
     Uint32 rumble_until = 0, ps_since = 0;
+    /* DualSense USB audio for the HD haptics / speaker / microphone checks */
+    DsAudio *audio = ds_audio_new(true, true, NULL, NULL);
+    ds_audio_mic_enable(audio, true);
 
     for (;;) {
         SDL_Event ev;
@@ -296,6 +328,8 @@ void ui_run_padtest(SDL_Renderer *r, struct InputContext *in)
             if (k == SDLK_RETURN || k == SDLK_KP_ENTER) {
                 switch (focus) {
                 case T_RUMBLE:   input_set_rumble(in, 220, 220); rumble_until = SDL_GetTicks() + RUMBLE_TEST_MS; break;
+                case T_HAPTICS:  ds_audio_test_tone(audio, 0xc, 1500); break;
+                case T_SPEAKER:  ds_audio_test_tone(audio, 0x3, 1000); break;
                 case T_TRIGGERS: triggers_on = !triggers_on; set_triggers(in, triggers_on); break;
                 case T_LIGHTBAR: {
                     light_idx = (light_idx + 1) % (int)(sizeof(LIGHTBAR_COLOURS) / sizeof(LIGHTBAR_COLOURS[0]));
@@ -330,6 +364,7 @@ void ui_run_padtest(SDL_Renderer *r, struct InputContext *in)
         draw_controller(r, &st);
         draw_info(r, in, &st);
         draw_tests(r, focus, triggers_on, light_idx, player);
+        draw_audio_status(r, audio);
         text(r, W / 2, 1000, ps_since ? "Keep holding PS to exit..."
                                       : "Remote: Left/Right choose a test, OK runs it, Back exits.   "
                                         "Controller: hold PS for 2 s to exit.",
@@ -337,6 +372,8 @@ void ui_run_padtest(SDL_Renderer *r, struct InputContext *in)
         SDL_RenderPresent(r);
         SDL_Delay(16);
     }
+
+    ds_audio_free(audio);
 
     /* leave the pads as the launcher found them */
     input_set_rumble(in, 0, 0);
