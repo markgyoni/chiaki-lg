@@ -95,6 +95,7 @@ int config_load(AppConfig *cfg, const char *path)
     cfg->ps5_mac          = json_get_str(root,  "ps5_mac");
     cfg->wakeup_delay_ms  = json_get_int(root,  "wakeup_delay_ms",  60000);
     cfg->sleep_on_exit    = json_get_bool(root, "sleep_on_exit",    true);
+    cfg->input_debug      = json_get_bool(root, "input_debug",      false);
 
     // log_level: string or legacy bool
     {

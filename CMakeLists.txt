@@ -132,7 +132,12 @@ add_executable(chiaki-webos
     src/input.c
     src/ui.c
     src/stats.c
+    src/pad_diag.c
 )
+
+# Standalone controller diagnostics CLI (run over SSH on the TV; see tools/paddiag.c)
+add_executable(paddiag tools/paddiag.c src/pad_diag.c)
+target_include_directories(paddiag PRIVATE src/)
 
 # Embed rpath so the binary finds ss4s module .so files in lib/ next to itself
 set_target_properties(chiaki-webos PROPERTIES
@@ -177,7 +182,7 @@ target_link_options(chiaki-webos PRIVATE
 )
 
 # ── Install ───────────────────────────────────────────────────────────────────
-install(TARGETS chiaki-webos RUNTIME DESTINATION .)
+install(TARGETS chiaki-webos paddiag RUNTIME DESTINATION .)
 install(FILES
     packaging/appinfo.json
     packaging/icon.png
@@ -196,7 +201,7 @@ set(IPK_STAGING_DIR "${CMAKE_BINARY_DIR}/ipk-staging")
 set(APP_ID "org.homebrew.chiaki")
 
 add_custom_target(ipk
-    DEPENDS chiaki-webos
+    DEPENDS chiaki-webos paddiag
 
     COMMAND ${CMAKE_COMMAND} -E make_directory "${IPK_STAGING_DIR}"
     COMMAND ${CMAKE_COMMAND} --install "${CMAKE_BINARY_DIR}" --prefix "${IPK_STAGING_DIR}"

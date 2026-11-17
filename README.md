@@ -130,6 +130,7 @@ Most settings are managed through the in-app Settings screen. You can also edit 
 | `ss4s_module` | string | `"auto"` | SS4S backend. `"auto"` detects webOS version at startup and selects `ndl-webos5` (webOS 5+) or `ndl-webos4` (webOS 4.x) automatically. Override only if auto-detection fails. |
 | `log_level` | string | `"warning"` | `"off"`, `"error"`, `"warning"`, `"info"`, `"verbose"`, `"debug"` |
 | `psn_refresh_token` | string | `""` | PSN OAuth2 refresh token for cloud wakeup (optional — see below) |
+| `input_debug` | bool | `false` | Log every raw gamepad event (`[PADEV]`) and sample raw HID reports at startup. Controller capabilities (`[PAD]`/`[HID]`) are always logged. |
 
 ### PSN cloud wakeup (optional)
 
@@ -169,6 +170,19 @@ ares-shell --device myTV -- "tail -f /tmp/chiaki.log"
 
 # Download the log
 ares-shell --device myTV -- "cat /tmp/chiaki.log" > chiaki.log
+```
+
+### Controller diagnostics
+
+Every launch logs each input device (`[PAD]`: name, bus, vendor/product, kernel driver, buttons, axis ranges, rumble support) and each raw HID node (`[HID]`). Set `"input_debug": true` to also log every button/axis event as `[PADEV]` lines.
+
+The IPK also ships a standalone `paddiag` tool for use over SSH (root):
+
+```bash
+cd /media/developer/apps/usr/palm/applications/org.homebrew.chiaki
+./paddiag info                      # capability dump
+./paddiag events                    # live button/axis monitor (Ctrl-C to stop)
+./paddiag hidraw /dev/hidraw0       # sample raw HID input reports
 ```
 
 Set `"log_level": "info"` or `"debug"` in config.json for more detail. Critical events (session lifecycle, wakeup, errors) are always logged regardless of level.

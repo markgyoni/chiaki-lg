@@ -24,6 +24,7 @@ typedef struct {
     // PSN cloud wakeup — needed when PS5 ignores local UDP wakeup (port 987).
     // Copy from: %APPDATA%\Roaming\Chiaki\Chiaki.conf  →  psn_refresh_token = v3.xxxxx
     char    *psn_refresh_token; // long-lived OAuth2 refresh token (optional)
+    bool     input_debug;       // log every raw gamepad event + sample hidraw reports
 } AppConfig;
 
 int  config_load(AppConfig *cfg, const char *path);

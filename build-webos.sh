@@ -748,7 +748,14 @@ cmake --build "$BUILD_DIR" -j"$NJOBS"
 
 echo ""
 echo "=== Packaging IPK ==="
-cmake --build "$BUILD_DIR" --target ipk
+if command -v ares-package >/dev/null 2>&1; then
+    cmake --build "$BUILD_DIR" --target ipk
+else
+    # Still stage the app tree so it can be packaged elsewhere
+    # (e.g. `ares-package build-webos/ipk-staging` on Windows) or copied over SSH.
+    cmake --install "$BUILD_DIR" --prefix "$BUILD_DIR/ipk-staging"
+    echo "-- ares-package not found: skipped IPK. Staged app tree: $BUILD_DIR/ipk-staging"
+fi
 
 echo ""
 echo "=== Done! ==="

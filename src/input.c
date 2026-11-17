@@ -1,5 +1,6 @@
 #include "input.h"
 #include "app_log.h"
+#include "pad_diag.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -83,6 +84,7 @@ typedef struct {
     char path[64];
     int  abs_min[ABS_CNT];
     int  abs_max[ABS_CNT];
+    int  abs_logged[ABS_CNT];   // last value logged in input_debug mode
     ChordState chord;
 } GamepadDev;
 
@@ -95,6 +97,7 @@ struct InputContext {
 
     pthread_t     reader_thread;
     volatile bool running;
+    bool          debug;
 
     ChiakiSession *session;
 };
@@ -341,6 +344,23 @@ static void *evdev_reader(void *arg)
             }
             if (n != sizeof(ev)) continue;
 
+            if (ctx->debug) {
+                GamepadDev *pd = &ctx->pads[i];
+                const char *dev = strrchr(pd->path, '/') + 1;
+                if (ev.type == EV_KEY) {
+                    const char *nm = pad_diag_key_name(ev.code);
+                    app_log_always("[PADEV] %s KEY 0x%03x %s %d\n", dev, ev.code,
+                                   nm ? nm : "?", ev.value);
+                } else if (ev.type == EV_ABS && ev.code < ABS_CNT &&
+                           pad_diag_abs_significant(ev.value, pd->abs_min[ev.code],
+                                                    pd->abs_max[ev.code],
+                                                    &pd->abs_logged[ev.code])) {
+                    const char *nm = pad_diag_abs_name(ev.code);
+                    app_log_always("[PADEV] %s ABS 0x%02x %s %d\n", dev, ev.code,
+                                   nm ? nm : "?", ev.value);
+                }
+            }
+
             bool changed = false;
             pthread_mutex_lock(&ctx->state_mutex);
 
@@ -443,6 +463,7 @@ static void open_gamepads(InputContext *ctx)
             if (ioctl(fd, EVIOCGABS(axis), &info) == 0) {
                 pad->abs_min[axis] = info.minimum;
                 pad->abs_max[axis] = info.maximum;
+                pad->abs_logged[axis] = info.value;
             }
         }
 
@@ -456,9 +477,9 @@ static void open_gamepads(InputContext *ctx)
         // we read and route events ourselves in evdev_reader(), completely
         // bypassing SDL's SDL_CONTROLLERBUTTON path.
         if (ioctl(fd, EVIOCGRAB, 1) < 0) {
-            app_log("[INPUT] EVIOCGRAB FAILED for \"%s\" %s: %s\n",
-                    devname, path, strerror(errno));
-            app_log("[INPUT] System button intercept (B=Back, A=OK) may still occur\n");
+            app_log_always("[INPUT] EVIOCGRAB FAILED for \"%s\" %s: %s\n",
+                           devname, path, strerror(errno));
+            app_log_always("[INPUT] System button intercept (B=Back, A=OK) may still occur\n");
         } else {
             app_log("[INPUT] EVIOCGRAB OK — exclusive control of \"%s\" (%s)\n",
                     devname, path);
@@ -467,7 +488,15 @@ static void open_gamepads(InputContext *ctx)
         snprintf(pad->path, sizeof(pad->path), "%s", path);
         pad->fd = fd;
         ctx->num_pads++;
-        app_log("[INPUT] Opened gamepad: \"%s\" @ %s\n", devname, path);
+
+        struct input_id id;
+        memset(&id, 0, sizeof(id));
+        ioctl(fd, EVIOCGID, &id);
+        char drv[64];
+        pad_diag_evdev_driver(path, drv, sizeof(drv));
+        app_log_always("[INPUT] Opened gamepad: \"%s\" @ %s bus=0x%02x vid=%04x pid=%04x driver=%s\n",
+                       devname, path, id.bustype, id.vendor, id.product,
+                       drv[0] ? drv : "(none)");
     }
     closedir(dir);
 
@@ -482,7 +511,29 @@ static void open_gamepads(InputContext *ctx)
 
 // ── Public API ─────────────────────────────────────────────────────────────────
 
-InputContext *input_init(void)
+// Capability dump of every input/hidraw node, logged once per launch so
+// controller reports from users come with everything needed to map them.
+static void log_controller_diagnostics(bool debug)
+{
+    pad_diag_log_process_ids(app_log_always);
+    pad_diag_dump_evdev(app_log_always);
+    pad_diag_dump_hidraw(app_log_always);
+
+    if (!debug) return;
+    // Passive sample of raw reports (no feature request, so evdev keeps working).
+    DIR *dir = opendir("/dev");
+    if (!dir) return;
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        if (strncmp(ent->d_name, "hidraw", 6) != 0) continue;
+        char path[64];
+        snprintf(path, sizeof(path), "/dev/%s", ent->d_name);
+        pad_diag_hidraw_sample(app_log_always, path, 500, false);
+    }
+    closedir(dir);
+}
+
+InputContext *input_init(bool debug)
 {
     InputContext *ctx = calloc(1, sizeof(*ctx));
     if (!ctx) return NULL;
@@ -491,7 +542,9 @@ InputContext *input_init(void)
     pthread_mutex_init(&ctx->state_mutex, NULL);
     ctx->running = true;
     ctx->session = NULL;
+    ctx->debug   = debug;
 
+    log_controller_diagnostics(debug);
     open_gamepads(ctx);
 
     pthread_create(&ctx->reader_thread, NULL, evdev_reader, ctx);
