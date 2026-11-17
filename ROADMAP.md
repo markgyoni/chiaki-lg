@@ -232,7 +232,9 @@ Merged into **Stage 11** (DualSense USB audio), which shares the same USB audio 
 **Bluetooth:** not planned. Over BT the pad carries audio in proprietary HID output reports. HD haptics over BT is possible in principle (it needs the btfix interrupt-channel path from Stage 7, at a much higher data rate) but is only partly reverse-engineered. There is no known open implementation of the BT microphone or speaker. Revisit only as an experiment once USB works.
 
 Tasks:
-- [ ] **Check first:** with the pad on USB, `/proc/asound/cards` lists it, and the app's user (uid 5131, group `audio`?) can open its `/dev/snd/pcmC*` devices. If the app can't, the options are elevated rights via the Homebrew Channel or dropping the stage.
+- [x] **Check first:** with the pad on USB, `/proc/asound/cards` lists it, and the app's user (uid 5131, group `audio`?) can open its `/dev/snd/pcmC*` devices. If the app can't, the options are elevated rights via the Homebrew Channel or dropping the stage.
+  **Result (2026-11-17):** passes. Card 2 `USB-Audio - DualSense Wireless Controller`; `/dev/snd/pcmC2D0p` and `pcmC2D0c` are `root:audio 660` and the app runs with group 29 (`audio`). Nothing else (PulseAudio) holds the card. Playback: S16_LE, **4 ch**, 48 kHz. Capture: S16_LE, **2 ch** (not mono), 48 kHz. 1 ms packets.
+  Side note: while plugged in, the pad also stays connected over Bluetooth, so it shows up twice (BT + USB evdev nodes, both opened).
 - [ ] Find the DualSense card (USB VID/PID `054c:0ce6` / `0df2`) and open it with ALSA (or SDL audio if SDL's ALSA backend sees it).
 - [ ] **Microphone:** capture 48 kHz mono in 480-sample (10 ms) frames, then send them to the PS5 with libchiaki: `chiaki_session_connect_microphone`, `ChiakiOpusEncoder` + `ChiakiAudioSender`. Follow chiaki-ng's `gui/src/streamsession.cpp`, which also uses speex echo cancellation.
 - [ ] **Mute button:** toggle the mic with `chiaki_session_toggle_microphone`, and drive the mute LED (output report byte 8 of the common block).
