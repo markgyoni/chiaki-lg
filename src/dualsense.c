@@ -238,6 +238,7 @@ void ds_motion_reset(DsMotion *m)
 #define OUT_VF0_HAPTICS_SELECT     0x02
 #define OUT_VF0_RIGHT_TRIGGER      0x04
 #define OUT_VF0_LEFT_TRIGGER       0x08
+#define OUT_VF1_MIC_MUTE_LED       0x01
 #define OUT_VF1_LIGHTBAR           0x04
 #define OUT_VF1_PLAYER_LEDS        0x10
 #define OUT_VF1_INTENSITY          0x40
@@ -316,6 +317,13 @@ void ds_output_set_player(DsOutput *o, uint8_t player_index)
     o->player_dirty = true;
 }
 
+void ds_output_set_mute_led(DsOutput *o, uint8_t mode)
+{
+    if (mode == o->mute_led && o->setup_done) return;
+    o->mute_led = mode;
+    o->mute_dirty = true;
+}
+
 static long mono_ms(void)
 {
     struct timespec t;
@@ -331,7 +339,7 @@ static long min_interval(const DsOutput *o)
 static bool pending(const DsOutput *o)
 {
     return !o->setup_done || o->rumble_dirty || o->trig_dirty || o->intensity_dirty ||
-           o->led_dirty || o->player_dirty;
+           o->led_dirty || o->player_dirty || o->mute_dirty;
 }
 
 bool ds_output_flush_sync(DsOutput *o)
@@ -398,6 +406,10 @@ bool ds_output_flush(DsOutput *o)
         c[1] |= OUT_VF1_PLAYER_LEDS;
         c[43] = o->player_leds;
     }
+    if (o->mute_dirty || setup) {
+        c[1] |= OUT_VF1_MIC_MUTE_LED;
+        c[8] = o->mute_led;
+    }
 
     if (o->bt) {
         uint8_t seed = 0xa2;
@@ -414,6 +426,6 @@ bool ds_output_flush(DsOutput *o)
     if (w != (ssize_t)size)
         return false;
     o->setup_done = true;
-    o->rumble_dirty = o->trig_dirty = o->intensity_dirty = o->led_dirty = o->player_dirty = false;
+    o->rumble_dirty = o->trig_dirty = o->intensity_dirty = o->led_dirty = o->player_dirty = o->mute_dirty = false;
     return true;
 }

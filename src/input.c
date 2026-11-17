@@ -158,6 +158,11 @@ struct InputContext {
     uint8_t         led[3];
     uint8_t         player_index;
 
+    // DualSense USB audio (Stage 11)
+    bool            hd_haptics;      // haptics stream plays on a USB DualSense's actuators
+    uint8_t         mute_led;        // 0 off, 1 on (mic muted)
+    int             mute_presses;    // mute button presses not yet taken by the app
+
     int             inotify_fd;          // -1 if unavailable
     bool            rescan_pending;
     struct timespec rescan_at;
@@ -421,6 +426,7 @@ static void activate_dsout_locked(InputContext *ctx, GamepadDev *pad)
 {
     ds_output_set_lightbar(&pad->dsout, ctx->led[0], ctx->led[1], ctx->led[2]);
     ds_output_set_player(&pad->dsout, ctx->player_index);
+    ds_output_set_mute_led(&pad->dsout, ctx->mute_led);
     ds_output_set_intensity(&pad->dsout, ctx->ds_intensity);
     if (ctx->trig_valid && ctx->trigger_effects_enabled && !ctx->trig_intensity_off)
         ds_output_set_triggers(&pad->dsout, ctx->trig_type_l, ctx->trig_l,
@@ -828,6 +834,8 @@ static void ds_apply_touch_locked(GamepadDev *pad, const DsInputState *ds)
 static void ds_apply_locked(InputContext *ctx, GamepadDev *pad, const DsInputState *ds)
 {
     ChiakiControllerState *st = &pad->state;
+    if (ds->mute && !pad->ds_last.mute && !pad->standby)
+        ctx->mute_presses++;
     st->buttons  = ds->buttons;
     st->left_x   = normalize_axis(ds->lx, 0, 255);
     st->left_y   = normalize_axis(ds->ly, 0, 255);
@@ -1022,7 +1030,13 @@ static void *evdev_reader(void *arg)
                 GamepadDev *pad = &ctx->pads[i];
                 if (pad->fd < 0 || pad->standby) continue;
                 if (pad->dsout_active) {
-                    ds_output_set_rumble(&pad->dsout, s, w);
+                    // HD haptics: the haptics stream already drives this pad's
+                    // actuators as audio; only classic PS5 rumble goes to the motors.
+                    if (ctx->hd_haptics && !pad->dsout.bt)
+                        ds_output_set_rumble(&pad->dsout, ctx->rumble_enabled ? ctx->rumble_strong : 0,
+                                             ctx->rumble_enabled ? ctx->rumble_weak : 0);
+                    else
+                        ds_output_set_rumble(&pad->dsout, s, w);
                     if (!ds_output_flush(&pad->dsout) && !pad->dsout_failed_logged) {
                         pad->dsout_failed_logged = true;
                         app_log_always("[INPUT] %s: DualSense output report write failed: %s\n",
@@ -1225,6 +1239,7 @@ void input_set_session(InputContext *ctx, ChiakiSession *session)
     }
     ctx->haptic_count = 0;
     ctx->haptic_level = 0;
+    ctx->mute_presses = 0;
     pthread_mutex_unlock(&ctx->state_mutex);
 }
 
@@ -1312,6 +1327,38 @@ void input_set_effect_intensity(InputContext *ctx, bool triggers, int level)
     apply_triggers_locked(ctx);
     pthread_mutex_unlock(&ctx->state_mutex);
     app_log_always("[INPUT] %s intensity from PS5: %d\n", triggers ? "trigger" : "vibration", level);
+}
+
+void input_set_hd_haptics(InputContext *ctx, bool on)
+{
+    if (!ctx) return;
+    pthread_mutex_lock(&ctx->state_mutex);
+    if (on != ctx->hd_haptics)
+        app_log_always("[INPUT] HD haptics %s — haptics%s turned into rumble on a USB DualSense\n",
+                       on ? "on" : "off", on ? " no longer" : "");
+    ctx->hd_haptics = on;
+    pthread_mutex_unlock(&ctx->state_mutex);
+}
+
+void input_set_mic_led(InputContext *ctx, uint8_t mode)
+{
+    if (!ctx) return;
+    pthread_mutex_lock(&ctx->state_mutex);
+    ctx->mute_led = mode;
+    for (int i = 0; i < MAX_GAMEPADS; i++)
+        if (ctx->pads[i].fd >= 0 && ctx->pads[i].dsout_active)
+            ds_output_set_mute_led(&ctx->pads[i].dsout, mode);
+    pthread_mutex_unlock(&ctx->state_mutex);
+}
+
+int input_take_mute_presses(InputContext *ctx)
+{
+    if (!ctx) return 0;
+    pthread_mutex_lock(&ctx->state_mutex);
+    int n = ctx->mute_presses;
+    ctx->mute_presses = 0;
+    pthread_mutex_unlock(&ctx->state_mutex);
+    return n;
 }
 
 void input_motion_reset(InputContext *ctx)

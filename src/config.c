@@ -1,4 +1,5 @@
 #include "config.h"
+#include "app_log.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -85,6 +86,14 @@ int config_load(AppConfig *cfg, const char *path)
     cfg->rp_key_type      = json_get_int(root,  "rp_key_type",      0);
     cfg->video_width      = json_get_int(root,  "video_width",      1920);
     cfg->video_height     = json_get_int(root,  "video_height",     1080);
+    // The PS5 streams Remote Play at up to 1080p; a larger request makes it
+    // refuse the stream ("AvCap failed to initialize video"), so clamp.
+    if (cfg->video_width > 1920 || cfg->video_height > 1080) {
+        app_log_always("[CFG] %dx%d is above what Remote Play streams — using 1920x1080\n",
+                       cfg->video_width, cfg->video_height);
+        cfg->video_width  = 1920;
+        cfg->video_height = 1080;
+    }
     cfg->video_fps        = json_get_int(root,  "video_fps",        60);
     cfg->video_bitrate    = json_get_int(root,  "video_bitrate",    15000);
     cfg->audio_volume     = json_get_int(root,  "audio_volume",     100);
@@ -100,6 +109,8 @@ int config_load(AppConfig *cfg, const char *path)
     cfg->dualsense_hid    = json_get_bool(root, "dualsense_hid",    true);
     cfg->motion           = json_get_bool(root, "motion",           true);
     cfg->trigger_effects  = json_get_bool(root, "trigger_effects",  true);
+    cfg->dualsense_hd_haptics = json_get_bool(root, "dualsense_hd_haptics", true);
+    cfg->dualsense_mic    = json_get_bool(root, "dualsense_mic",    true);
     cfg->dualsense_bt_patch = json_get_bool(root, "dualsense_bt_patch", true);
     cfg->controller_profile = json_get_str(root, "controller_profile");
     if (!cfg->controller_profile || !cfg->controller_profile[0]) {

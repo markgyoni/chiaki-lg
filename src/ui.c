@@ -497,6 +497,8 @@ typedef enum {
     SET_MOTION,
     SET_TRIGGERS,
     SET_BT_PATCH,
+    SET_HD_HAPTICS,       /* DualSense USB audio */
+    SET_MIC,
     SET_RETURN,
     SET_COUNT
 } SettingsFocus;
@@ -510,13 +512,13 @@ static const char *PROFILE_LABELS[]  = {"Automatic", "PlayStation (HID)", "PlayS
 
 /* One line of help per setting, shown under the list for the focused row. */
 static const char *SETTING_HELP[SET_COUNT] = {
-    [SET_RESOLUTION]    = "Stream resolution. 1080p suits most TVs; 2160p needs a fast network.",
+    [SET_RESOLUTION]    = "Stream resolution. The PS5 streams Remote Play at up to 1080p; the TV upscales it.",
     [SET_FPS]           = "60 fps feels much smoother; 30 fps uses half the bandwidth.",
     [SET_BITRATE]       = "Higher looks sharper but needs a stronger network. Lower it if the picture stutters.",
     [SET_CODEC]         = "H.265 gives better quality per bit. Use H.265 HDR for HDR games on an HDR TV.",
     [SET_PS5]           = "On for a PS5, off for a PS4 (PS4 streams always use H.264).",
     [SET_WAKE_ON_START] = "Wake the console from rest mode when you press Connect.",
-    [SET_SLEEP_ON_EXIT] = "Put the console into rest mode when you leave the stream.",
+    [SET_SLEEP_ON_EXIT] = "Put the console into rest mode when you close the app.",
     [SET_LOG_LEVEL]     = "How much is written to /tmp/chiaki.log. Warning is enough unless you are debugging.",
     [SET_INPUT_DEBUG]   = "Log every raw controller event. Only for diagnosing controller problems.",
     [SET_PROFILE]       = "Button layout. Automatic picks the right one for each controller.",
@@ -526,6 +528,8 @@ static const char *SETTING_HELP[SET_COUNT] = {
     [SET_TRIGGERS]      = "DualSense adaptive trigger resistance from games.",
     [SET_BT_PATCH]      = "Rooted TVs: fix the TV's Bluetooth so DualSense vibration, triggers and lightbar "
                           "work wirelessly. Nothing is changed on disk; a reboot undoes it.",
+    [SET_HD_HAPTICS]    = "DualSense on USB: play the game's haptics on the controller's actuators (fine-grained, like on a PS5) instead of plain rumble.",
+    [SET_MIC]           = "DualSense on USB: use its microphone for voice chat. Press the controller's mute button during a stream to switch it on or off.",
     [SET_RETURN]        = "Go back to the start screen.",
 };
 
@@ -534,8 +538,8 @@ typedef struct { int w, h; const char *label; } ResOption;
 static const ResOption RES_OPTIONS[] = {
     {1280, 720,  "720p"},
     {1920, 1080, "1080p"},
-    {2560, 1440, "1440p"},
-    {3840, 2160, "2160p"},
+    /* No 1440p/2160p: the PS5 streams Remote Play at up to 1080p and refuses
+     * larger sizes ("AvCap failed to initialize video"). */
 };
 static const int FPS_OPTIONS[]    = {30, 60};
 static const int BITRATE_OPTIONS[] = {5000, 10000, 15000, 25000, 35000, 45000};
@@ -711,6 +715,8 @@ static void ui_render_settings_screen(SDL_Renderer *r,
     ROW(RX, y, SET_MOTION, "Motion controls", on_off(cfg && cfg->motion));
     ROW(RX, y, SET_TRIGGERS, "Adaptive triggers", on_off(cfg && cfg->trigger_effects));
     ROW(RX, y, SET_BT_PATCH, "Bluetooth fix (DualSense)", on_off(cfg && cfg->dualsense_bt_patch));
+    ROW(RX, y, SET_HD_HAPTICS, "HD haptics (USB)", on_off(cfg && cfg->dualsense_hd_haptics));
+    ROW(RX, y, SET_MIC, "Microphone (USB)", on_off(cfg && cfg->dualsense_mic));
     y += GROUP_GAP;
     draw_button(r, RX, y, COL_W, ROW_H + 6, "Back", focus == SET_RETURN, true);
 #undef ROW
@@ -963,6 +969,8 @@ static bool ui_write_settings_json(const char *config_path, const AppConfig *cfg
     SET_BOOL("dualsense_hid",      cfg->dualsense_hid);
     SET_BOOL("motion",             cfg->motion);
     SET_BOOL("trigger_effects",    cfg->trigger_effects);
+    SET_BOOL("dualsense_hd_haptics", cfg->dualsense_hd_haptics);
+    SET_BOOL("dualsense_mic",      cfg->dualsense_mic);
     SET_BOOL("dualsense_bt_patch", cfg->dualsense_bt_patch);
     SET_BOOL("input_debug",        cfg->input_debug);
 
@@ -1078,6 +1086,8 @@ static void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg,
                     else if (focus == SET_MOTION)       { cfg->motion = !cfg->motion; changed = input_changed = true; }
                     else if (focus == SET_TRIGGERS)     { cfg->trigger_effects = !cfg->trigger_effects; changed = input_changed = true; }
                     else if (focus == SET_BT_PATCH)     { cfg->dualsense_bt_patch = !cfg->dualsense_bt_patch; changed = input_changed = true; }
+                    else if (focus == SET_HD_HAPTICS)   { cfg->dualsense_hd_haptics = !cfg->dualsense_hd_haptics; changed = true; }
+                    else if (focus == SET_MIC)          { cfg->dualsense_mic = !cfg->dualsense_mic; changed = true; }
                     else if (focus == SET_WAKE_ON_START){ cfg->wakeup      = !cfg->wakeup;      changed = true; }
                     else if (focus == SET_SLEEP_ON_EXIT){ cfg->sleep_on_exit = !cfg->sleep_on_exit; changed = true; }
                     else if (focus == SET_RETURN)       { wants_exit = true; continue; }
@@ -1138,6 +1148,13 @@ static void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg,
  * Main registration / launcher UI
  * ══════════════════════════════════════════════════════════════════════════ */
 
+static char g_notice[256];
+
+void ui_set_launcher_notice(const char *text)
+{
+    snprintf(g_notice, sizeof(g_notice), "%s", text ? text : "");
+}
+
 UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
                              const char *config_path, ChiakiLog *log,
                              struct InputContext *input)
@@ -1156,6 +1173,10 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
     int  focus   = 0;
     bool editing = false;
     char msg[256] = {0};
+    if (g_notice[0]) {
+        snprintf(msg, sizeof(msg), "%s", g_notice);
+        g_notice[0] = '\0';
+    }
 
     /* Start with Connect focused if already ready */
     if (ui_valid_ipv4(ip) && ui_has_keys(cfg))

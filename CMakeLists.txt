@@ -116,6 +116,16 @@ function(fix_pkgconfig_target tgt)
     endif()
 endfunction()
 
+# Opus inside libchiaki: the microphone path (ChiakiOpusEncoder, Stage 11).
+# libopus is cross-built into the staging dir; a one-line FindOpus module
+# avoids pulling in chiaki-ng's cmake/ dir (its FindOpenSSL/FindCURL would
+# shadow CMake's own).
+set(CHIAKI_LIB_ENABLE_OPUS ON CACHE BOOL "" FORCE)
+set(Opus_INCLUDE_DIRS "${WEBOS_STAGING_DIR}/include")
+set(Opus_LIBRARIES    "${WEBOS_STAGING_DIR}/lib/libopus.a")
+file(WRITE "${CMAKE_BINARY_DIR}/cmake-opus/FindOpus.cmake" "set(Opus_FOUND TRUE)\n")
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_BINARY_DIR}/cmake-opus")
+
 add_subdirectory("${CHIAKI_SOURCE_DIR}/lib" "${CMAKE_BINARY_DIR}/chiaki_lib" EXCLUDE_FROM_ALL)
 
 fix_pkgconfig_target(PkgConfig::json-c)
@@ -137,6 +147,7 @@ add_executable(chiaki-webos
     src/pad_output.c
     src/dualsense.c
     src/bt_patch.c
+    src/ds_audio.c
     src/ui_text.c
     src/ui_padtest.c
 )
@@ -195,6 +206,7 @@ target_link_libraries(chiaki-webos PRIVATE
     OpenSSL::SSL
     OpenSSL::Crypto
     opus
+    asound                # DualSense USB audio (Stage 11); libasound.so.2 is on every webOS TV
     m pthread dl atomic
 )
 

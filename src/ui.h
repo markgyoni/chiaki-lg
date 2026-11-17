@@ -21,6 +21,10 @@ void ui_render_loading(SDL_Renderer *renderer, const char *base_text);
 //  - import chiaki-ng config (chiaki-ng-Default.ini) into config.json
 //  - connect to start the stream
 struct InputContext;
+/* Message shown on the launcher the next time it opens (e.g. why a stream
+ * could not start).  Contains "ailed" → drawn in the error colour. */
+void ui_set_launcher_notice(const char *text);
+
 UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
                              const char *config_path, ChiakiLog *log,
                              struct InputContext *input);

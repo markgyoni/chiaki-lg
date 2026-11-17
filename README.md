@@ -233,6 +233,9 @@ Set `"log_level": "info"` or `"debug"` in config.json for more detail. Critical 
 **Stream doesn't start / connection timeout**
 Ensure Remote Play is enabled on your PS5 (Settings → System → Remote Play → Enable Remote Play). Verify the IP in `config.json` and that the TV and PS5 are on the same subnet.
 
+**"Connection failed: the console could not start a ... stream"**
+The PS5 refused the video settings (`AvCap failed to initialize video` in the log). PS5 Remote Play streams at up to **1080p**; 1440p and 2160p are refused, so the app no longer offers them and treats larger values in `config.json` as 1080p. If it still happens at 1080p, try H.264.
+
 **Black screen with audio**
 Likely a codec or NDL issue. Check logs. Try `"video_codec": "h264"` as a fallback — H.264 has broader compatibility across NDL versions.
 
