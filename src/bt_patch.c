@@ -94,9 +94,13 @@ static void *worker(void *arg)
                                                                       : "/usr/bin/luna-send";
         snprintf(cmd, sizeof(cmd),
                  "%s -n 1 -w 8000 luna://org.webosbrew.hbchannel.service/exec "
-                 "'{\"command\":\"%s\"}' </dev/null 2>&1", ls, path);
+                 "'{\"command\":\"%s\"}' </dev/null 2>/dev/null", ls, path);
         run_capture(cmd, out, sizeof(out));
-        json_object *root = json_tokener_parse(out);
+        /* The reply can be preceded by loader noise (e.g. an "ld.so: object
+         * '$LD_PRELOAD' ... ignored" line from the app's environment): parse
+         * from the first '{'. */
+        const char *json = strchr(out, '{');
+        json_object *root = json ? json_tokener_parse(json) : NULL;
         json_object *v;
         const char *stdout_s = NULL, *err_s = NULL;
         if (root) {

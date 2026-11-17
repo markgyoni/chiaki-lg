@@ -196,18 +196,19 @@ static void draw_info(SDL_Renderer *r, struct InputContext *in, const ChiakiCont
                                   "No controller found. Turn one on or plug it in by USB.",
                                   28, UI_FONT_REGULAR, C_WARN, 3);
     }
-    for (int i = 0; i < n && i < 2; i++) {
+    int shown = 0;
+    for (int i = 0; i < n && i < 2 && y < Y + 260; i++, shown++) {
         text(r, X + 30, y, pads[i].name, 30, UI_FONT_SEMIBOLD, C_TEXT, UI_ALIGN_LEFT); y += 40;
         char s[160];
         snprintf(s, sizeof(s), "%s  |  layout %s%s", pads[i].connection, pads[i].profile,
                  pads[i].raw_hid ? "  |  touchpad + motion" : "");
-        text(r, X + 30, y, s, 26, UI_FONT_REGULAR, C_DIM, UI_ALIGN_LEFT); y += 36;
+        y += ui_text_draw_wrapped(r, X + 30, y, PW - 60, s, 26, UI_FONT_REGULAR, C_DIM, 2) + 4;
         y += ui_text_draw_wrapped(r, X + 30, y, PW - 60, pads[i].outputs, 26, UI_FONT_REGULAR,
                                   pads[i].outputs_active ? C_OK : C_WARN, 2);
         y += 18;
     }
-    if (n > 2) {
-        char s[48]; snprintf(s, sizeof(s), "+ %d more", n - 2);
+    if (n > shown) {
+        char s[48]; snprintf(s, sizeof(s), "+ %d more", n - shown);
         text(r, X + 30, y, s, 26, UI_FONT_REGULAR, C_DIM, UI_ALIGN_LEFT); y += 40;
     }
 
@@ -219,7 +220,7 @@ static void draw_info(SDL_Renderer *r, struct InputContext *in, const ChiakiCont
     text(r, X + 30, y + 56, s, 28, UI_FONT_REGULAR, C_DIM, UI_ALIGN_LEFT);
     snprintf(s, sizeof(s), "Accel  %+6.2f %+6.2f %+6.2f", st->accel_x, st->accel_y, st->accel_z);
     text(r, X + 30, y + 96, s, 28, UI_FONT_REGULAR, C_DIM, UI_ALIGN_LEFT);
-    text(r, X + 30, y + 150, "Tilt the controller:", 26, UI_FONT_REGULAR, C_DIM, UI_ALIGN_LEFT);
+    ui_text_draw_wrapped(r, X + 30, y + 150, PW - 300, "Tilt the controller to move the dot.", 26, UI_FONT_REGULAR, C_DIM, 2);
 
     /* spirit level from the accelerometer (x = roll, z = pitch, in g) */
     const int BX = X + PW - 150, BY = y + 150, BR = 100;

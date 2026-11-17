@@ -92,7 +92,7 @@ void pad_output_open(PadOutput *o, const char *event_path, int evdev_fd,
         /* Any output report switches a BT DualSense/DS4 to full input reports,
          * which hid-generic does not map to evdev — would kill the buttons.
          * Comes with the hidraw input backend (Stages 4 and 7). */
-        snprintf(o->why_none, sizeof(o->why_none), "Sony pad: needs hidraw backend (Stage 7)");
+        snprintf(o->why_none, sizeof(o->why_none), "Sony pad: outputs go through the DualSense HID backend");
         return;
     }
     if (!o->why_none[0])

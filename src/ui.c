@@ -8,6 +8,7 @@
 #include <json-c/json.h>
 #include <arpa/inet.h>
 #include <ctype.h>
+#include <math.h>
 
 #include "config_import.h"
 #include "ui_text.h"
@@ -202,13 +203,51 @@ static void draw_text_centered(SDL_Renderer *r, int cx, int y,
     draw_text(r, cx - text_width(text, scale) / 2, y, text, scale);
 }
 
-/* Rounded rect — two overlapping bars forming a cross with clipped corners */
+/* Rounded rect: a middle band plus one scanline per corner row, inset along
+ * the circle.  radius = h/2 gives a pill. */
 static void fill_rounded_rect(SDL_Renderer *r, int x, int y, int w, int h, int radius)
 {
-    if (radius * 2 >= w) radius = w / 2 - 1;
-    if (radius * 2 >= h) radius = h / 2 - 1;
-    fill_rect(r, x + radius, y,          w - radius * 2, h);
-    fill_rect(r, x,          y + radius, w,              h - radius * 2);
+    if (w <= 0 || h <= 0) return;
+    if (radius * 2 > w) radius = w / 2;
+    if (radius * 2 > h) radius = h / 2;
+    if (radius < 1) { fill_rect(r, x, y, w, h); return; }
+    fill_rect(r, x, y + radius, w, h - radius * 2);
+    for (int i = 0; i < radius; i++) {
+        float dy = (float)radius - (float)i - 0.5f;
+        int inset = radius - (int)(sqrtf((float)(radius * radius) - dy * dy) + 0.5f);
+        fill_rect(r, x + inset, y + i,         w - inset * 2, 1);
+        fill_rect(r, x + inset, y + h - 1 - i, w - inset * 2, 1);
+    }
+}
+
+/* 1px outline matching fill_rounded_rect's shape (no pixel drawn twice, so
+ * translucent colours stay even). */
+static void stroke_rounded_rect(SDL_Renderer *r, int x, int y, int w, int h, int radius)
+{
+    if (w <= 0 || h <= 0) return;
+    if (radius * 2 > w) radius = w / 2;
+    if (radius * 2 > h) radius = h / 2;
+    if (radius < 1) { draw_rect_outline(r, x, y, w, h); return; }
+    fill_rect(r, x,         y + radius, 1, h - radius * 2);
+    fill_rect(r, x + w - 1, y + radius, 1, h - radius * 2);
+    int prev = w / 2;                          /* row 0 runs to the middle: top edge */
+    for (int i = 0; i < radius; i++) {
+        float dy = (float)radius - (float)i - 0.5f;
+        int inset = radius - (int)(sqrtf((float)(radius * radius) - dy * dy) + 0.5f);
+        int len = prev - inset;
+        if (len < 1) len = 1;
+        int top = y + i, bot = y + h - 1 - i;
+        if (i == 0) {                          /* straight top/bottom edge */
+            fill_rect(r, x + inset, top, w - inset * 2, 1);
+            fill_rect(r, x + inset, bot, w - inset * 2, 1);
+        } else {
+            fill_rect(r, x + inset,             top, len, 1);
+            fill_rect(r, x + w - inset - len,   top, len, 1);
+            fill_rect(r, x + inset,             bot, len, 1);
+            fill_rect(r, x + w - inset - len,   bot, len, 1);
+        }
+        prev = inset;
+    }
 }
 
 /* Filled horizontal line (1px tall) */
@@ -223,40 +262,34 @@ static void draw_button(SDL_Renderer *r, int x, int y, int w, int h,
                         const char *label, bool focused, bool enabled)
 {
     int radius = 10;
-    int text_y = y + (h - 14) / 2;
+    const int scale = 3;               /* same size as the settings rows */
+    int text_y = y + (h - 7 * scale) / 2;
 
     if (!enabled) {
         /* Disabled — very faint */
         set_color(r, COL_BORDER_DIM);
         fill_rounded_rect(r, x, y, w, h, radius);
         set_color(r, COL_TEXT_FAINT);
-        draw_text_centered(r, x + w / 2, text_y, label, 2);
+        draw_text_centered(r, x + w / 2, text_y, label, scale);
         return;
     }
 
     if (focused) {
-        /* Focused — solid accent fill with subtle top highlight */
+        /* Focused — white ring + accent fill, like the launcher buttons */
+        set_color(r, COL_TEXT);
+        fill_rounded_rect(r, x - 3, y - 3, w + 6, h + 6, radius + 3);
         set_color(r, COL_ACCENT);
         fill_rounded_rect(r, x, y, w, h, radius);
-        /* Subtle top sheen */
-        set_color(r, 0x40, 0x90, 0xff, 0xff);
-        fill_rounded_rect(r, x + 2, y + 2, w - 4, h / 3, radius - 1);
-        set_color(r, COL_ACCENT);
-        fill_rounded_rect(r, x + 2, y + h / 4, w - 4, h / 2, radius - 1);
-        /* White text */
         set_color(r, COL_TEXT);
-        draw_text_centered(r, x + w / 2, text_y, label, 2);
-        /* Bottom accent line */
-        set_color(r, 0x60, 0xa8, 0xff, 0xff);
-        hline(r, x + radius, y + h - 3, w - radius * 2);
+        draw_text_centered(r, x + w / 2, text_y, label, scale);
     } else {
         /* Normal enabled */
         set_color(r, COL_CARD);
         fill_rounded_rect(r, x, y, w, h, radius);
         set_color(r, COL_BORDER);
-        draw_rect_outline(r, x, y, w, h);
+        stroke_rounded_rect(r, x, y, w, h, radius);
         set_color(r, COL_TEXT);
-        draw_text_centered(r, x + w / 2, text_y, label, 2);
+        draw_text_centered(r, x + w / 2, text_y, label, scale);
     }
 }
 
@@ -311,7 +344,7 @@ static void render_setup_screen(SDL_Renderer *r, const char *status,
         const char *st = can_connect ? "Ready to connect" : "Setup needed";
         int tw = ui_text_width(st, 30, UI_FONT_SEMIBOLD);
         int cx = SCREEN_W - M - tw - 40;
-        set_color(r, can_connect ? COL_SUCCESS_BG : COL_WARNING_BG);
+        if (can_connect) set_color(r, COL_SUCCESS_BG); else set_color(r, COL_WARNING_BG);
         fill_rounded_rect(r, cx, 30, tw + 40, 54, 27);
         ui_text_draw(r, cx + 20, 30 + (54 - ui_text_line_height(30)) / 2, st, 30, UI_FONT_SEMIBOLD,
                      can_connect ? C(COL_SUCCESS) : C(COL_WARNING), UI_ALIGN_LEFT);
@@ -412,7 +445,7 @@ static void render_setup_screen(SDL_Renderer *r, const char *status,
         ui_text_draw_wrapped(r, rx, ry, rw, "None connected. Turn a controller on, or plug it in by USB.",
                              28, UI_FONT_REGULAR, C(COL_WARNING), 2);
     for (int i = 0; i < n && i < 3 && ry < FOOT_Y - 140; i++) {
-        set_color(r, pads[i].outputs_active ? COL_SUCCESS : COL_WARNING);
+        if (pads[i].outputs_active) set_color(r, COL_SUCCESS); else set_color(r, COL_WARNING);
         fill_rounded_rect(r, rx, ry + 12, 14, 14, 7);
         ui_text_draw(r, rx + 30, ry, pads[i].name, 30, UI_FONT_SEMIBOLD, tx, UI_ALIGN_LEFT);
         ry += 40;
@@ -578,13 +611,13 @@ static void ui_draw_option_row(SDL_Renderer *r, int x, int y, int w, int h,
         set_color(r, COL_CODE_BG);
         fill_rounded_rect(r, x, y, w, h, radius);
         set_color(r, COL_BORDER_DIM);
-        draw_rect_outline(r, x, y, w, h);
+        stroke_rounded_rect(r, x, y, w, h, radius);
     }
 
     int scale = 3;
     int ty = y + (h - 7 * scale) / 2;
 
-    set_color(r, focused ? COL_TEXT : COL_TEXT_DIM);
+    if (focused) set_color(r, COL_TEXT); else set_color(r, COL_TEXT_DIM);
     draw_text(r, x + 20, ty, label, scale);
 
     if (value) {
@@ -804,7 +837,7 @@ void ui_render_stats_overlay(SDL_Renderer *r, const char *text)
 
     /* Border */
     set_color(r, COL_BORDER);
-    draw_rect_outline(r, x, y, box_w, box_h);
+    stroke_rounded_rect(r, x, y, box_w, box_h, 12);
 
     /* Left accent bar */
     set_color(r, COL_ACCENT);
@@ -1279,7 +1312,8 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
                         if (cfg && cfg->host && cfg->host[0])
                             snprintf(ip, sizeof(ip), "%s", cfg->host);
                         snprintf(msg, sizeof(msg), "Settings updated.");
-                        focus = (ui_has_keys(cfg) && ui_valid_ipv4(ip)) ? 14 : 0;
+                        /* Keep focus on Settings: jumping to Connect made a
+                         * second OK press start a session unexpectedly. */
                     } else if (!editing && focus == 14) {
                         /* Connect */
                         if (!ui_valid_ipv4(ip)) {
