@@ -158,6 +158,12 @@ struct InputContext {
     uint8_t         led[3];
     uint8_t         player_index;
 
+    // DualSense mute button: tap / hold, taken by the app with input_take_mute_event()
+    bool            mute_down;
+    struct timespec mute_since;
+    bool            mute_long_fired;
+    bool            mute_tap;
+
     int             inotify_fd;          // -1 if unavailable
     bool            rescan_pending;
     struct timespec rescan_at;
@@ -828,6 +834,16 @@ static void ds_apply_touch_locked(GamepadDev *pad, const DsInputState *ds)
 static void ds_apply_locked(InputContext *ctx, GamepadDev *pad, const DsInputState *ds)
 {
     ChiakiControllerState *st = &pad->state;
+    if (!pad->standby && ds->mute != pad->ds_last.mute) {
+        if (ds->mute) {                       // pressed
+            ctx->mute_down = true;
+            ctx->mute_long_fired = false;
+            get_monotonic(&ctx->mute_since);
+        } else if (ctx->mute_down) {          // released: a tap unless the hold already fired
+            ctx->mute_down = false;
+            if (!ctx->mute_long_fired) ctx->mute_tap = true;
+        }
+    }
     st->buttons  = ds->buttons;
     st->left_x   = normalize_axis(ds->lx, 0, 255);
     st->left_y   = normalize_axis(ds->ly, 0, 255);
@@ -1225,6 +1241,7 @@ void input_set_session(InputContext *ctx, ChiakiSession *session)
     }
     ctx->haptic_count = 0;
     ctx->haptic_level = 0;
+    ctx->mute_tap = ctx->mute_down = ctx->mute_long_fired = false;
     pthread_mutex_unlock(&ctx->state_mutex);
 }
 
@@ -1312,6 +1329,22 @@ void input_set_effect_intensity(InputContext *ctx, bool triggers, int level)
     apply_triggers_locked(ctx);
     pthread_mutex_unlock(&ctx->state_mutex);
     app_log_always("[INPUT] %s intensity from PS5: %d\n", triggers ? "trigger" : "vibration", level);
+}
+
+int input_take_mute_event(InputContext *ctx, int hold_ms)
+{
+    if (!ctx) return INPUT_MUTE_NONE;
+    int ev = INPUT_MUTE_NONE;
+    pthread_mutex_lock(&ctx->state_mutex);
+    if (ctx->mute_down && !ctx->mute_long_fired && ms_elapsed(&ctx->mute_since) >= hold_ms) {
+        ctx->mute_long_fired = true;
+        ev = INPUT_MUTE_HOLD;
+    } else if (ctx->mute_tap) {
+        ctx->mute_tap = false;
+        ev = INPUT_MUTE_TAP;
+    }
+    pthread_mutex_unlock(&ctx->state_mutex);
+    return ev;
 }
 
 void input_motion_reset(InputContext *ctx)

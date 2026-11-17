@@ -21,9 +21,9 @@ Streams PS4/PS5 Remote Play directly to your LG webOS TV.
 - **chiaki-ng settings import** — drop a `chiaki-ng-Default.ini` export file onto the TV to auto-import registration credentials (PS5 IP still required)
 - **Wake-on-LAN** — wakes PS5 from rest mode before connecting (UDP broadcast + unicast)
 - **PSN cloud wakeup** — optional Sony push-notification wakeup via PSN session API when local UDP wakeup is unreliable (requires PSN refresh token)
-- **Sleep-on-exit** — sends PS5 to rest mode when you quit the app
+- **Rest mode on exit** — Off, On, or Ask (a prompt when you leave the stream)
 - **Auto-reconnect** — retries on transient network errors; exits cleanly on deliberate disconnects
-- **Stats overlay** — real-time bitrate, FPS, codec, and latency display toggled with the TV remote UP button
+- **Stats overlay** — resolution/codec, frame rate, bitrate, network round trip, packet loss, lost frames, decoder buffer and session time; toggled with Up on the remote or Mute on the DualSense, in any screen corner
 - **webOS version auto-detection** — automatically selects the correct NDL backend (`ndl-webos5` or `ndl-webos4`) at runtime
 - **Two-tier logging** — critical diagnostics always written; verbose chatter gated by `log_level`
 
@@ -105,7 +105,7 @@ Most settings are managed through the in-app Settings screen. You can also edit 
     "wakeup": true,
     "ps5_mac": "AA:BB:CC:DD:EE:FF",
     "wakeup_delay_ms": 60000,
-    "sleep_on_exit": true,
+    "sleep_on_exit": "ask",
     "log_level": "warning",
     "psn_refresh_token": ""
 }
@@ -130,7 +130,8 @@ Most settings are managed through the in-app Settings screen. You can also edit 
 | `wakeup` | bool | `false` | Send wakeup packets before connecting |
 | `ps5_mac` | string | `""` | PS5 MAC address (used for Wake-on-LAN) |
 | `wakeup_delay_ms` | int | `60000` | Max time (ms) to wait for PS5 to wake |
-| `sleep_on_exit` | bool | `false` | Send PS5 to rest mode on app exit |
+| `sleep_on_exit` | string | `"ask"` | Rest mode when you leave a stream: `"off"`, `"on"`, or `"ask"` (a prompt when leaving with Back, Down twice or holding Mute). Older `true`/`false` values still work. |
+| `stats_corner` | string | `"top-left"` | Stats overlay corner: `"top-left"`, `"top-right"`, `"bottom-left"`, `"bottom-right"` |
 | `ss4s_module` | string | `"auto"` | SS4S backend. `"auto"` detects webOS version at startup and selects `ndl-webos5` (webOS 5+) or `ndl-webos4` (webOS 4.x) automatically. Override only if auto-detection fails. |
 | `log_level` | string | `"warning"` | `"off"`, `"error"`, `"warning"`, `"info"`, `"verbose"`, `"debug"` |
 | `psn_refresh_token` | string | `""` | PSN OAuth2 refresh token for cloud wakeup (optional — see below) |
@@ -196,6 +197,15 @@ The TV remote is not forwarded to the PS5 as controller input. During streaming 
 | **Down** twice (within 0.7 s) | Leave the stream and go back to the menu |
 | **Back** | Exit the app (while the stream is still connecting: cancel and go back to the menu) |
 | **Home** | Exit the app |
+
+On a DualSense (raw HID backend), the **Mute** button is not sent to the console:
+
+| DualSense | Action |
+|---|---|
+| **Mute** (tap) | Toggle stats overlay |
+| **Mute** (hold 3 s) | Leave the stream and go back to the menu |
+
+With `Rest mode on exit = Ask`, leaving the stream (Back, Down twice, holding Mute) asks whether to put the console in rest mode; no answer within 15 s keeps it on.
 
 ---
 

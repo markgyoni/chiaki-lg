@@ -1426,3 +1426,63 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
         SDL_Delay(16);
     }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * "Put the console in rest mode?" — shown over the stream when leaving it
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+bool ui_ask_rest_mode(SDL_Renderer *r, struct InputContext *input)
+{
+    if (!r) return false;
+    ui_text_init(r);
+    const Uint32 TIMEOUT_MS = 15000;          /* no answer: keep the console on */
+    Uint32 t0 = SDL_GetTicks();
+    int focus = 1;                             /* 0 = Rest mode, 1 = Keep on */
+    int answer = -1;
+    SDL_Event ev;
+    while (SDL_PollEvent(&ev)) { /* drop the keys that led here */ }
+
+    while (answer < 0) {
+        pad_nav_poll(input);
+        while (SDL_PollEvent(&ev)) {
+            if (ev.type == SDL_QUIT) { answer = 0; break; }
+            if (ev.type != SDL_KEYDOWN) continue;
+            SDL_Keycode k = ev.key.keysym.sym;
+            if (k == SDLK_LEFT)  focus = 0;
+            if (k == SDLK_RIGHT) focus = 1;
+            if (k == SDLK_RETURN || k == SDLK_KP_ENTER) { answer = focus == 0; break; }
+            if (k == SDLK_ESCAPE || k == WEBOS_KEY_BACK || k == WEBOS_KEY_RED) { answer = 0; break; }
+        }
+        Uint32 el = SDL_GetTicks() - t0;
+        if (answer < 0 && el >= TIMEOUT_MS) answer = 0;
+
+        /* dim the (still running) video, then the dialog */
+        SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
+        set_color(r, 0x00, 0x00, 0x00, 0xa0);
+        fill_rect(r, 0, 0, SCREEN_W, SCREEN_H);
+        SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+
+        const int BW = 900, BH = 380, BX = (SCREEN_W - BW) / 2, BY = (SCREEN_H - BH) / 2;
+        set_color(r, COL_PANEL);
+        fill_rounded_rect(r, BX, BY, BW, BH, 24);
+        set_color(r, COL_BORDER);
+        stroke_rounded_rect(r, BX, BY, BW, BH, 24);
+        ui_text_draw(r, SCREEN_W / 2, BY + 48, "Put the console in rest mode?", 44, UI_FONT_BOLD,
+                     C(COL_TEXT), UI_ALIGN_CENTER);
+        char sub[96];
+        snprintf(sub, sizeof(sub), "Leaving the stream. Keeping it on in %u s.",
+                 (unsigned)((TIMEOUT_MS - (el < TIMEOUT_MS ? el : TIMEOUT_MS) + 999) / 1000));
+        ui_text_draw(r, SCREEN_W / 2, BY + 116, sub, 28, UI_FONT_REGULAR, C(COL_TEXT_DIM), UI_ALIGN_CENTER);
+
+        const int W = 340, H = 104, GAP = 40, Y = BY + BH - H - 50;
+        int x0 = SCREEN_W / 2 - W - GAP / 2;
+        big_button(r, x0, Y, W, H, "Rest mode", focus == 0, true, false);
+        big_button(r, x0 + W + GAP, Y, W, H, "Keep on", focus == 1, true, false);
+
+        SDL_RenderPresent(r);
+        SDL_Delay(16);
+    }
+    while (SDL_PollEvent(&ev)) { }
+    app_log_always("[UI] rest mode prompt: %s\n", answer ? "rest mode" : "keep on");
+    return answer == 1;
+}

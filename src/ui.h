@@ -25,6 +25,10 @@ struct InputContext;
  * could not start).  Contains "ailed" → drawn in the error colour. */
 void ui_set_launcher_notice(const char *text);
 
+/* Over the running stream: "Put the console in rest mode?"  Returns true for
+ * rest mode; Back, no answer within 15 s or Home keeps it on. */
+bool ui_ask_rest_mode(SDL_Renderer *renderer, struct InputContext *input);
+
 UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
                              const char *config_path, ChiakiLog *log,
                              struct InputContext *input);

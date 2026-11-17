@@ -24,6 +24,7 @@
 #include <chiaki/discovery.h>
 #include <chiaki/log.h>
 #include <chiaki/base64.h>
+#include <chiaki/videoreceiver.h>
 #include <curl/curl.h>
 // For PSN Remote Play session nonces (data1/data2)
 #include <openssl/rand.h>
@@ -1000,6 +1001,8 @@ static bool should_reconnect(ChiakiQuitReason reason)
     }
 }
 
+#define MUTE_HOLD_MS 3000   // DualSense mute held this long leaves the stream
+
 // ── Loading screen that keeps animating ───────────────────────────────────────
 // Blocking work (PSN HTTP calls, the wakeup probe, retry back-off) used to run
 // on the main thread between loading-screen frames, so the spinner froze for
@@ -1604,6 +1607,7 @@ int main(int argc, char *argv[])
             SDL_Event ev;
             uint32_t stream_start_ms = 0;   // first video frame → startup hint
             uint32_t last_down_ms = 0;      // Down-Down → back to the menu
+            bool user_left = false;         // left deliberately (Back, Down-Down, holding Mute)
             g_loading_text = "Starting stream";
 
             while (!g_session_ended && !g_should_exit)
@@ -1630,6 +1634,7 @@ int main(int argc, char *argv[])
                         } else {
                             app_log("[APP] Remote Back/Escape — exiting\n");
                             g_should_exit = true;
+                            user_left = true;
                         }
                         g_session_ended = true;
                         break;
@@ -1648,6 +1653,7 @@ int main(int argc, char *argv[])
                             {
                                 app_log_always("[APP] Remote Down-Down — back to the menu\n");
                                 g_return_to_menu = true;
+                                user_left = g_have_video_frame;
                                 g_session_ended  = true;
                                 break;
                             }
@@ -1681,6 +1687,21 @@ int main(int argc, char *argv[])
                 if (g_session_ended || g_should_exit)
                     break;
 
+                // DualSense mute button: tap → stats overlay, hold 3 s → menu.
+                int mute = input_take_mute_event(input_ctx, MUTE_HOLD_MS);
+                if (mute == INPUT_MUTE_TAP && g_have_video_frame)
+                {
+                    stats_overlay_toggle(&stats_overlay);
+                    app_log_always("[UI] Stats overlay %s (Mute)\n", stats_overlay.enabled ? "ON" : "OFF");
+                }
+                else if (mute == INPUT_MUTE_HOLD)
+                {
+                    app_log_always("[APP] Mute held — back to the menu\n");
+                    g_return_to_menu = true;
+                    g_session_ended  = true;
+                    user_left = g_have_video_frame;
+                    break;
+                }
 
                 // Until the first video sample: opaque loading screen.  Then
                 // transparent frames so the NDL plane underneath shows through.
@@ -1703,6 +1724,20 @@ int main(int argc, char *argv[])
 
                     if (stats_overlay.enabled)
                     {
+                        // network figures, read the way chiaki-ng's GUI does
+                        atomic_store_explicit(&g_stream_stats.rtt_ms,
+                                              g_session.rtt_us ? (int)((g_session.rtt_us + 500) / 1000) : -1,
+                                              memory_order_relaxed);   // 0 = not measured
+                        atomic_store_explicit(&g_stream_stats.packet_loss_pm,
+                                              (int)(g_session.stream_connection.congestion_control.packet_loss * 1000.0 + 0.5),
+                                              memory_order_relaxed);
+                        if (g_session.stream_connection.video_receiver)
+                            atomic_store_explicit(&g_stream_stats.frames_lost,
+                                                  chiaki_video_receiver_get_frames_lost_total(g_session.stream_connection.video_receiver),
+                                                  memory_order_relaxed);
+                        atomic_store_explicit(&g_stream_stats.target_kbps, cfg.video_bitrate, memory_order_relaxed);
+                        atomic_store_explicit(&g_stream_stats.started_ms, stream_start_ms, memory_order_relaxed);
+
                         int lat_us = 0;
                         if (SS4S_PlayerGetVideoLatency(ss4s_player, 1000000, &lat_us))
                             atomic_store_explicit(&g_stream_stats.video_latency_ms,
@@ -1725,7 +1760,7 @@ int main(int argc, char *argv[])
                             float opacity = 1.0f;
                             if (elapsed > hint_duration_ms - fade_ms)
                                 opacity = (float)(hint_duration_ms - elapsed) / (float)fade_ms;
-                            ui_render_hint(g_renderer, "Remote: Up = stream stats,  Down twice = back to menu",
+                            ui_render_hint(g_renderer, "Stats: Up or Mute     Back to menu: Down twice or hold Mute",
                                            opacity);
                         }
                     }
@@ -1736,17 +1771,28 @@ int main(int argc, char *argv[])
             }
 
             // ── Session teardown ──────────────────────────────────────────────
-            // Rest mode only when the app itself is closing (not when going
-            // back to the menu), and not if the PS5 already went to sleep.
-            if (cfg.sleep_on_exit == SLEEP_ON && g_should_exit && !g_ps5_sleeping)
-            {
-                app_log("[APP] Sending PS5 to rest mode\n");
-                chiaki_session_goto_bed(&g_session);
-                SDL_Delay(500);
-            }
-
-            // Detach session from evdev reader before tearing down the session.
+            // Detach the gamepads first: nothing more goes to the console, and
+            // they drive the rest-mode prompt instead.
             input_set_session(input_ctx, NULL);
+
+            // Rest mode: "On" when the user leaves the stream (Back, Down twice,
+            // holding Mute) or the app is closed (Home); "Ask" shows a prompt
+            // when the user leaves.  Never when the console itself went to sleep
+            // or the session already ended on its side.
+            if (!g_ps5_sleeping && g_quit_reason == CHIAKI_QUIT_REASON_NONE)
+            {
+                bool rest = false;
+                if (cfg.sleep_on_exit == SLEEP_ON && (user_left || g_should_exit))
+                    rest = true;
+                else if (cfg.sleep_on_exit == SLEEP_ASK && user_left)
+                    rest = ui_ask_rest_mode(g_renderer, input_ctx);
+                if (rest)
+                {
+                    app_log_always("[APP] Sending the console to rest mode\n");
+                    chiaki_session_goto_bed(&g_session);
+                    SDL_Delay(500);
+                }
+            }
             app_log_always("[APP] Stopping session (reason=%d)\n", (int)g_quit_reason);
             if (!g_should_exit)
             {
