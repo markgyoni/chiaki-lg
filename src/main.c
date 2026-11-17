@@ -1328,6 +1328,16 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    // The UI is laid out for 1920x1080.  A logical size makes SDL scale it to
+    // the TV's real UI plane (1280x720 on some models, 3840x2160 on others)
+    // and keeps it intact when the window is resized to the stream size.
+    {
+        int ow = 0, oh = 0;
+        SDL_GetRendererOutputSize(g_renderer, &ow, &oh);
+        SDL_RenderSetLogicalSize(g_renderer, 1920, 1080);
+        app_log_always("[APP] UI plane %dx%d, drawn at 1920x1080\n", ow, oh);
+    }
+
     // Clear to fully transparent black immediately so the NDL plane is
     // visible as soon as the first frame is presented.
     SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_NONE);

@@ -31,7 +31,7 @@ void input_get_state(InputContext *ctx, ChiakiControllerState *out);
 
 typedef struct {
     char name[64];
-    char connection[16];     // "USB", "Bluetooth", ...
+    char connection[32];     // "USB", "Bluetooth", "USB (Bluetooth on standby)"
     char profile[24];        // mapping profile id
     bool dualsense;          // DualSense / DualSense Edge
     bool raw_hid;            // read through raw HID (touchpad + motion)

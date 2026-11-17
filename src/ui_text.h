@@ -30,6 +30,10 @@ int  ui_text_line_height(int px);
 void ui_text_draw(SDL_Renderer *r, int x, int y, const char *s, int px, UiFontWeight w,
                   SDL_Color c, UiAlign align);
 
+/* Draw one line, cut with "..." if it is wider than max_w (left aligned). */
+void ui_text_draw_fit(SDL_Renderer *r, int x, int y, int max_w, const char *s, int px,
+                      UiFontWeight w, SDL_Color c);
+
 /* Draw text wrapped to max_w (breaks at spaces and '\n').  Returns the
  * height used.  If max_lines > 0, stops after that many lines ("..." added). */
 int  ui_text_draw_wrapped(SDL_Renderer *r, int x, int y, int max_w, const char *s, int px,

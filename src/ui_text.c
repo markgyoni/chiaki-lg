@@ -26,6 +26,7 @@ static struct {
 static bool          g_inited;
 static bool          g_have_ttf;
 static SDL_Renderer *g_renderer;
+static float         g_scale = 1.0f;   /* real output pixels per logical pixel */
 static const char   *g_font_files[UI_FONT_COUNT];
 
 static const char *FONT_CANDIDATES[UI_FONT_COUNT][3] = {
@@ -181,11 +182,29 @@ static void bm_draw(SDL_Renderer *r, int x, int y, const char *s, int px)
     }
 }
 
+/* Glyphs are rendered at the TV's real resolution, so text stays sharp when
+ * the 1920x1080 layout is scaled up (4K UI plane) and isn't wasted when it
+ * is scaled down.  Sizes and positions stay in logical pixels. */
+static void update_scale(SDL_Renderer *r)
+{
+    int lw = 0, lh = 0, ow = 0, oh = 0;
+    SDL_RenderGetLogicalSize(r, &lw, &lh);
+    float s = 1.0f;
+    if (lh > 0 && SDL_GetRendererOutputSize(r, &ow, &oh) == 0 && oh > 0)
+        s = (float)oh / (float)lh;
+    if (s < 0.5f) s = 0.5f;
+    if (s > 2.0f) s = 2.0f;
+    g_scale = s;
+}
+
+static int scaled_px(int px) { int p = (int)(px * g_scale + 0.5f); return p < 6 ? 6 : p; }
+
 /* ── Public API ───────────────────────────────────────────────────────────── */
 
 bool ui_text_init(SDL_Renderer *r)
 {
     g_renderer = r;
+    update_scale(r);
     if (g_inited) return g_have_ttf;
     g_inited = true;
 
@@ -241,9 +260,9 @@ int ui_text_width(const char *s, int px, UiFontWeight w)
 {
     if (!s || !s[0]) return 0;
     if (g_have_ttf) {
-        TTF_Font *f = get_font(w, px);
+        TTF_Font *f = get_font(w, scaled_px(px));
         int tw = 0, th = 0;
-        if (f && ttf.SizeUTF8(f, s, &tw, &th) == 0) return tw;
+        if (f && ttf.SizeUTF8(f, s, &tw, &th) == 0) return (int)(tw / g_scale + 0.5f);
     }
     return bm_width(s, px);
 }
@@ -255,10 +274,11 @@ void ui_text_draw(SDL_Renderer *r, int x, int y, const char *s, int px, UiFontWe
     int lh = ui_text_line_height(px);
     if (g_have_ttf) {
         g_renderer = r;
-        CacheEntry *e = cache_get(s, px, w);
+        CacheEntry *e = cache_get(s, scaled_px(px), w);
         if (e) {
-            int dx = align == UI_ALIGN_CENTER ? x - e->tw / 2 : align == UI_ALIGN_RIGHT ? x - e->tw : x;
-            SDL_Rect dst = { dx, y + (lh - e->th) / 2, e->tw, e->th };
+            int tw = (int)(e->tw / g_scale + 0.5f), th = (int)(e->th / g_scale + 0.5f);
+            int dx = align == UI_ALIGN_CENTER ? x - tw / 2 : align == UI_ALIGN_RIGHT ? x - tw : x;
+            SDL_Rect dst = { dx, y + (lh - th) / 2, tw, th };
             SDL_SetTextureColorMod(e->tex, c.r, c.g, c.b);
             SDL_SetTextureAlphaMod(e->tex, c.a);
             SDL_RenderCopy(r, e->tex, NULL, &dst);
@@ -273,6 +293,29 @@ void ui_text_draw(SDL_Renderer *r, int x, int y, const char *s, int px, UiFontWe
     SDL_SetRenderDrawColor(r, c.r, c.g, c.b, c.a);
     bm_draw(r, dx, y + (lh - 7 * bm_scale(px)) / 2, s, px);
     SDL_SetRenderDrawBlendMode(r, old);
+}
+
+void ui_text_draw_fit(SDL_Renderer *r, int x, int y, int max_w, const char *s, int px,
+                      UiFontWeight w, SDL_Color c)
+{
+    if (!s || !s[0]) return;
+    if (ui_text_width(s, px, w) <= max_w) {
+        ui_text_draw(r, x, y, s, px, w, c, UI_ALIGN_LEFT);
+        return;
+    }
+    char buf[256];
+    size_t len = strlen(s);
+    if (len > sizeof(buf) - 4) len = sizeof(buf) - 4;
+    while (len > 0) {
+        len--;
+        while (len > 0 && ((unsigned char)s[len] & 0xc0) == 0x80) len--;   /* UTF-8 boundary */
+        size_t l = len;
+        while (l > 0 && s[l - 1] == ' ') l--;
+        memcpy(buf, s, l);
+        memcpy(buf + l, "...", 4);
+        if (ui_text_width(buf, px, w) <= max_w) break;
+    }
+    ui_text_draw(r, x, y, buf, px, w, c, UI_ALIGN_LEFT);
 }
 
 /* Shared word-wrap: calls `emit` for each line (may be NULL to just count). */

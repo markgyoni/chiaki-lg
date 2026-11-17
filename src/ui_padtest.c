@@ -198,7 +198,7 @@ static void draw_info(SDL_Renderer *r, struct InputContext *in, const ChiakiCont
     }
     int shown = 0;
     for (int i = 0; i < n && i < 2 && y < Y + 260; i++, shown++) {
-        text(r, X + 30, y, pads[i].name, 30, UI_FONT_SEMIBOLD, C_TEXT, UI_ALIGN_LEFT); y += 40;
+        ui_text_draw_fit(r, X + 30, y, PW - 60, pads[i].name, 30, UI_FONT_SEMIBOLD, C_TEXT); y += 40;
         char s[160];
         snprintf(s, sizeof(s), "%s  |  layout %s%s", pads[i].connection, pads[i].profile,
                  pads[i].raw_hid ? "  |  touchpad + motion" : "");

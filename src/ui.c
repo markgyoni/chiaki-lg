@@ -153,6 +153,16 @@ static void fill_rect(SDL_Renderer *r, int x, int y, int w, int h)
     SDL_RenderFillRect(r, &rect);
 }
 
+/* Drawing size: the renderer's logical size (1920x1080, set in main.c and
+ * scaled to whatever the TV's UI plane is), else its real output size. */
+static void ui_screen_size(SDL_Renderer *r, int *w, int *h)
+{
+    int lw = 0, lh = 0;
+    SDL_RenderGetLogicalSize(r, &lw, &lh);
+    if (lw > 0 && lh > 0) { *w = lw; *h = lh; return; }
+    (void)SDL_GetRendererOutputSize(r, w, h);
+}
+
 static void draw_rect_outline(SDL_Renderer *r, int x, int y, int w, int h)
 {
     SDL_Rect rect = {x, y, w, h};
@@ -448,7 +458,7 @@ static void render_setup_screen(SDL_Renderer *r, const char *status,
     for (int i = 0; i < n && i < 3 && ry < FOOT_Y - 140; i++) {
         if (pads[i].outputs_active) set_color(r, COL_SUCCESS); else set_color(r, COL_WARNING);
         fill_rounded_rect(r, rx, ry + 12, 14, 14, 7);
-        ui_text_draw(r, rx + 30, ry, pads[i].name, 30, UI_FONT_SEMIBOLD, tx, UI_ALIGN_LEFT);
+        ui_text_draw_fit(r, rx + 30, ry, rw - 30, pads[i].name, 30, UI_FONT_SEMIBOLD, tx);
         ry += 40;
         char line[160];
         snprintf(line, sizeof(line), "%s  -  %s", pads[i].connection, pads[i].outputs);
@@ -740,7 +750,7 @@ static void ui_render_settings_screen(SDL_Renderer *r,
 void ui_render_loading(SDL_Renderer *r, const char *base_text)
 {
     int sw = SCREEN_W, sh = SCREEN_H;
-    (void)SDL_GetRendererOutputSize(r, &sw, &sh);
+    ui_screen_size(r, &sw, &sh);
 
     SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
     set_color(r, COL_BG);
@@ -805,7 +815,7 @@ void ui_render_stats_overlay(SDL_Renderer *r, const char *text)
     if (!r || !text || !text[0]) return;
 
     int sw = SCREEN_W, sh = SCREEN_H;
-    (void)SDL_GetRendererOutputSize(r, &sw, &sh);
+    ui_screen_size(r, &sw, &sh);
 
     const int scale  = 2;
     const int pad    = 20;
@@ -865,7 +875,7 @@ void ui_render_hint(SDL_Renderer *r, const char *text, float opacity)
     if (!r || !text || !text[0] || opacity <= 0.0f) return;
 
     int sw = SCREEN_W, sh = SCREEN_H;
-    (void)SDL_GetRendererOutputSize(r, &sw, &sh);
+    ui_screen_size(r, &sw, &sh);
     (void)sh;
 
     const int scale = 2;
