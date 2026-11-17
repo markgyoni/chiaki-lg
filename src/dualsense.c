@@ -378,7 +378,11 @@ bool ds_output_flush(DsOutput *o)
         size = 63 < sizeof(rep) ? 63 : sizeof(rep);
     }
 
-    if (o->rumble_dirty) {
+    if (o->rumble_dirty && (o->motor_strong || o->motor_weak)) {
+        /* Rumble emulation on.  HAPTICS_SELECT also switches the pad's audio
+         * haptics off (SDL: "Disable audio haptics"), so these bits are only
+         * set while a motor actually runs; a report without them stops the
+         * motors and gives the actuators back to USB audio (HD haptics). */
         c[0]  |= OUT_VF0_COMPAT_VIBRATION | OUT_VF0_HAPTICS_SELECT;
         c[38] |= OUT_VF2_COMPAT_VIBRATION2;   /* newer firmware */
         c[2] = o->motor_weak;

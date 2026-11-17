@@ -82,6 +82,43 @@ static snd_pcm_t *open_pcm(int card, snd_pcm_stream_t dir, unsigned channels)
     return pcm;
 }
 
+/* The card's USB volume controls come up at 0 % playback ("PCM Playback
+ * Volume") on the TV, which silences the haptic actuators too.  Set playback
+ * to full (the haptics level comes from the stream) and the headset mic to a
+ * usable gain. */
+static void setup_mixer(int card)
+{
+    char dev[16];
+    snprintf(dev, sizeof(dev), "hw:%d", card);
+    snd_mixer_t *mx = NULL;
+    if (snd_mixer_open(&mx, 0) < 0) return;
+    if (snd_mixer_attach(mx, dev) < 0 || snd_mixer_selem_register(mx, NULL, NULL) < 0 ||
+        snd_mixer_load(mx) < 0) {
+        snd_mixer_close(mx);
+        return;
+    }
+    for (snd_mixer_elem_t *e = snd_mixer_first_elem(mx); e; e = snd_mixer_elem_next(e)) {
+        const char *name = snd_mixer_selem_get_name(e);
+        long mn = 0, mxv = 0;
+        if (snd_mixer_selem_has_playback_volume(e) &&
+            snd_mixer_selem_get_playback_volume_range(e, &mn, &mxv) == 0) {
+            snd_mixer_selem_set_playback_volume_all(e, mxv);
+            app_log_always("[DSAUDIO] mixer '%s' playback volume -> %ld (max)\n", name, mxv);
+        }
+        if (snd_mixer_selem_has_playback_switch(e))
+            snd_mixer_selem_set_playback_switch_all(e, 1);
+        if (snd_mixer_selem_has_capture_volume(e) &&
+            snd_mixer_selem_get_capture_volume_range(e, &mn, &mxv) == 0) {
+            long v = mn + (mxv - mn) * 7 / 10;
+            snd_mixer_selem_set_capture_volume_all(e, v);
+            app_log_always("[DSAUDIO] mixer '%s' capture volume -> %ld (of %ld)\n", name, v, mxv);
+        }
+        if (snd_mixer_selem_has_capture_switch(e))
+            snd_mixer_selem_set_capture_switch_all(e, 1);
+    }
+    snd_mixer_close(mx);
+}
+
 /* ── Playback (haptics) + card discovery ──────────────────────────────────── */
 
 static void *play_main(void *arg)
@@ -95,8 +132,12 @@ static void *play_main(void *arg)
             int card = find_dualsense_card();
             pthread_mutex_lock(&a->lock);
             if (card != a->card) {
-                if (card >= 0) app_log_always("[DSAUDIO] DualSense sound card %d found\n", card);
-                else           app_log_always("[DSAUDIO] DualSense sound card gone\n");
+                if (card >= 0) {
+                    app_log_always("[DSAUDIO] DualSense sound card %d found\n", card);
+                    setup_mixer(card);
+                } else {
+                    app_log_always("[DSAUDIO] DualSense sound card gone\n");
+                }
                 a->card = card;
                 pthread_cond_broadcast(&a->cond);
             }
