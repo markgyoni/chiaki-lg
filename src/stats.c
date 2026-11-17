@@ -23,6 +23,10 @@ void stats_reset(StreamStatsCounters *c)
     atomic_store_explicit(&c->audio_packets, 0, memory_order_relaxed);
 
     atomic_store_explicit(&c->video_latency_ms, -1, memory_order_relaxed);
+    atomic_store_explicit(&c->rtt_ms, -1, memory_order_relaxed);
+    atomic_store_explicit(&c->packet_loss_pm, -1, memory_order_relaxed);
+    atomic_store_explicit(&c->frames_lost, 0, memory_order_relaxed);
+    atomic_store_explicit(&c->started_ms, 0, memory_order_relaxed);
 
     // Don't force format to 0 if the caller already set it, but it's fine either way.
     // Keep current format as-is.
@@ -136,25 +140,44 @@ void stats_overlay_update(StatsOverlay *o, const StreamStatsCounters *c, uint32_
     o->last_video_fail = vfail;
 
     // Build display string (kept compact for TV readability)
-    // Note: total bitrate here is based on payload sizes from Chiaki callbacks.
-    char latency_line[96];
+    int rtt = atomic_load_explicit(&c->rtt_ms, memory_order_relaxed);
+    int loss_pm = atomic_load_explicit(&c->packet_loss_pm, memory_order_relaxed);
+    int lost = atomic_load_explicit(&c->frames_lost, memory_order_relaxed);
+    int target_kbps = atomic_load_explicit(&c->target_kbps, memory_order_relaxed);
+    unsigned started = atomic_load_explicit(&c->started_ms, memory_order_relaxed);
+
+    char latency[48], net[64], loss[48], up[32];
     if(vlat_ms_reported >= 0)
-        snprintf(latency_line, sizeof(latency_line), "Latency: ~%d ms (SS4S avg)\n", vlat_ms_reported);
+        snprintf(latency, sizeof(latency), "%d ms", vlat_ms_reported);
     else if(o->latency_ms >= 0)
-        snprintf(latency_line, sizeof(latency_line), "Latency: ~%d ms (buf %d f)\n", o->latency_ms, o->video_buf_frames);
+        snprintf(latency, sizeof(latency), "~%d ms (%d frames)", o->latency_ms, o->video_buf_frames);
     else
-        snprintf(latency_line, sizeof(latency_line), "Latency: n/a\n");
+        snprintf(latency, sizeof(latency), "n/a");
+    if(rtt >= 0) snprintf(net, sizeof(net), "%d ms", rtt);
+    else         snprintf(net, sizeof(net), "n/a");
+    if(loss_pm >= 0) snprintf(loss, sizeof(loss), "%.1f %%   Frames lost: %d", loss_pm / 10.0, lost);
+    else             snprintf(loss, sizeof(loss), "n/a   Frames lost: %d", lost);
+    if(started) {
+        unsigned s = (unsigned)(now_ms - started) / 1000u;
+        snprintf(up, sizeof(up), "%u:%02u:%02u", s / 3600u, (s / 60u) % 60u, s % 60u);
+    } else {
+        snprintf(up, sizeof(up), "-");
+    }
 
     snprintf(o->text, sizeof(o->text),
-        "Stream Stats (UP to toggle)\n"
-        "Video: %dx%d  %s\n"
-        "Bitrate: %.2f Mbps  (V %.2f / A %.2f)\n"
-        "FPS: %.1f\n"
-        "%s"
-        "Video feed errors: %llu\n",
+        "STREAM STATS\n"
+        "Video        %dx%d  %s\n"
+        "Frame rate   %.1f fps (target %d)\n"
+        "Bitrate      %.1f Mbps of %.0f  (audio %.2f)\n"
+        "Network RTT  %s\n"
+        "Packet loss  %s\n"
+        "Decoder      %s   errors %llu\n"
+        "Session      %s",
         vw, vh, codec_to_str(vcodec),
-        o->mbps_total, o->mbps_video, o->mbps_audio,
-        o->fps,
-        latency_line,
-        (unsigned long long)o->feed_fail_total);
+        o->fps, vfps_cfg,
+        o->mbps_total, target_kbps / 1000.0, o->mbps_audio,
+        net,
+        loss,
+        latency, (unsigned long long)o->feed_fail_total,
+        up);
 }

@@ -50,7 +50,7 @@ static int config_write_defaults(const char *path)
         "  \"wakeup\": true,\n"
         "  \"ps5_mac\": \"\",\n"
         "  \"wakeup_delay_ms\": 60000,\n"
-        "  \"sleep_on_exit\": true,\n"
+        "  \"sleep_on_exit\": \"ask\",\n"
         "  \"log_level\": \"warning\",\n"
         "  \"psn_refresh_token\": \"\"\n"
         "}\n");
@@ -103,7 +103,19 @@ int config_load(AppConfig *cfg, const char *path)
     cfg->wakeup           = json_get_bool(root, "wakeup",           true);
     cfg->ps5_mac          = json_get_str(root,  "ps5_mac");
     cfg->wakeup_delay_ms  = json_get_int(root,  "wakeup_delay_ms",  60000);
-    cfg->sleep_on_exit    = json_get_bool(root, "sleep_on_exit",    true);
+    {   /* "sleep_on_exit": "off" | "on" | "ask" (older configs: true/false) */
+        char *s = json_get_str(root, "sleep_on_exit");
+        cfg->sleep_on_exit = !s ? SLEEP_ASK
+                           : (!strcmp(s, "ask")) ? SLEEP_ASK
+                           : (!strcmp(s, "on") || !strcmp(s, "true")) ? SLEEP_ON : SLEEP_OFF;
+        free(s);
+    }
+    {   /* "stats_corner": "top-left" | "top-right" | "bottom-left" | "bottom-right" */
+        char *s = json_get_str(root, "stats_corner");
+        cfg->stats_corner = !s ? 0 : !strcmp(s, "top-right") ? 1 : !strcmp(s, "bottom-left") ? 2
+                          : !strcmp(s, "bottom-right") ? 3 : 0;
+        free(s);
+    }
     cfg->input_debug      = json_get_bool(root, "input_debug",      false);
     cfg->rumble           = json_get_bool(root, "rumble",           true);
     cfg->dualsense_hid    = json_get_bool(root, "dualsense_hid",    true);

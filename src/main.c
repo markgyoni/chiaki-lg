@@ -1712,7 +1712,7 @@ int main(int argc, char *argv[])
                     }
                     stats_overlay_update(&stats_overlay, &g_stream_stats, SDL_GetTicks());
                     if (stats_overlay.enabled)
-                        ui_render_stats_overlay(g_renderer, stats_overlay.text);
+                        ui_render_stats_overlay(g_renderer, stats_overlay.text, cfg.stats_corner);
 
                     // Startup hint for 6 s (1 s fade-out) unless stats are shown.
                     if (!stats_overlay.enabled && stream_start_ms != 0)
@@ -1738,7 +1738,7 @@ int main(int argc, char *argv[])
             // ── Session teardown ──────────────────────────────────────────────
             // Rest mode only when the app itself is closing (not when going
             // back to the menu), and not if the PS5 already went to sleep.
-            if (cfg.sleep_on_exit && g_should_exit && !g_ps5_sleeping)
+            if (cfg.sleep_on_exit == SLEEP_ON && g_should_exit && !g_ps5_sleeping)
             {
                 app_log("[APP] Sending PS5 to rest mode\n");
                 chiaki_session_goto_bed(&g_session);

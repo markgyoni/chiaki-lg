@@ -350,7 +350,7 @@ static void render_setup_screen(SDL_Renderer *r, const char *status,
     fill_rect(r, 0, 0, SCREEN_W, 6);
     ui_text_draw(r, M, 28, "Chiaki-lg", 60, UI_FONT_BOLD, C(COL_TEXT), UI_ALIGN_LEFT);
     ui_text_draw(r, M + ui_text_width("Chiaki-lg", 60, UI_FONT_BOLD) + 28, 50,
-                 "PS5 Remote Play for LG TVs", 32, UI_FONT_REGULAR, C(COL_TEXT_DIM), UI_ALIGN_LEFT);
+                 "PlayStation Remote Play for LG TVs", 32, UI_FONT_REGULAR, C(COL_TEXT_DIM), UI_ALIGN_LEFT);
     {
         const char *st = can_connect ? "Ready to connect" : "Setup needed";
         int tw = ui_text_width(st, 30, UI_FONT_SEMIBOLD);
@@ -365,7 +365,7 @@ static void render_setup_screen(SDL_Renderer *r, const char *status,
 
     /* ── Left: address + actions ── */
     int y = TOP;
-    ui_text_draw(r, M, y, "PS5 address", 30, UI_FONT_SEMIBOLD, C(COL_TEXT_DIM), UI_ALIGN_LEFT);
+    ui_text_draw(r, M, y, "Console address", 30, UI_FONT_SEMIBOLD, C(COL_TEXT_DIM), UI_ALIGN_LEFT);
     y += 46;
     {
         bool f = focus == 0 || show_keypad;
@@ -431,17 +431,14 @@ static void render_setup_screen(SDL_Renderer *r, const char *status,
             "3. Enter the PS5 address on the left and press Import keys.", 30,
             UI_FONT_REGULAR, tx, 0) + 24;
     } else if (!can_connect) {
-        ui_text_draw(r, rx, ry, "Enter the PS5 address", 42, UI_FONT_BOLD, tx, UI_ALIGN_LEFT);
+        ui_text_draw(r, rx, ry, "Enter the console address", 42, UI_FONT_BOLD, tx, UI_ALIGN_LEFT);
         ry += 66;
         ry += ui_text_draw_wrapped(r, rx, ry, rw,
             "On the PS5: Settings > Network > Connection Status > View Connection Status. "
             "Use the IPv4 address, for example 192.168.1.50.", 30, UI_FONT_REGULAR, tx, 0) + 24;
     } else {
         ui_text_draw(r, rx, ry, "Ready to play", 42, UI_FONT_BOLD, tx, UI_ALIGN_LEFT);
-        ry += 66;
-        ry += ui_text_draw_wrapped(r, rx, ry, rw,
-            "Press Connect. During the stream, press Up on the remote for stream statistics, "
-            "Down twice to return here, and Back to close the app.", 30, UI_FONT_REGULAR, dim, 0) + 24;
+        ry += 84;
     }
 
     /* controllers (live) */
@@ -497,6 +494,7 @@ typedef enum {
     SET_MOTION,
     SET_TRIGGERS,
     SET_BT_PATCH,
+    SET_STATS_CORNER,     /* STREAM */
     SET_RETURN,
     SET_COUNT
 } SettingsFocus;
@@ -516,7 +514,7 @@ static const char *SETTING_HELP[SET_COUNT] = {
     [SET_CODEC]         = "H.265 gives better quality per bit. Use H.265 HDR for HDR games on an HDR TV.",
     [SET_PS5]           = "On for a PS5, off for a PS4 (PS4 streams always use H.264).",
     [SET_WAKE_ON_START] = "Wake the console from rest mode when you press Connect.",
-    [SET_SLEEP_ON_EXIT] = "Put the console into rest mode when you close the app.",
+    [SET_SLEEP_ON_EXIT] = "Rest mode when you leave a stream (Back, Down twice, or holding Mute). Ask shows a choice each time.",
     [SET_LOG_LEVEL]     = "How much is written to /tmp/chiaki.log. Warning is enough unless you are debugging.",
     [SET_INPUT_DEBUG]   = "Log every raw controller event. Only for diagnosing controller problems.",
     [SET_PROFILE]       = "Button layout. Automatic picks the right one for each controller.",
@@ -526,6 +524,7 @@ static const char *SETTING_HELP[SET_COUNT] = {
     [SET_TRIGGERS]      = "DualSense adaptive trigger resistance from games.",
     [SET_BT_PATCH]      = "Rooted TVs: fix the TV's Bluetooth so DualSense vibration, triggers and lightbar "
                           "work wirelessly. Nothing is changed on disk; a reboot undoes it.",
+    [SET_STATS_CORNER]  = "Where the stream stats appear. Show or hide them with Up on the remote or Mute on the DualSense.",
     [SET_RETURN]        = "Go back to the start screen.",
 };
 
@@ -649,6 +648,12 @@ static void ui_draw_option_row(SDL_Renderer *r, int x, int y, int w, int h,
 
 static const char *on_off(bool v) { return v ? "On" : "Off"; }
 
+/* indexed by SLEEP_OFF / SLEEP_ON / SLEEP_ASK */
+static const char *SLEEP_LABELS[] = { "Off", "On", "Ask" };
+static const char *SLEEP_STRS[]   = { "off", "on", "ask" };
+static const char *CORNER_LABELS[] = { "Top left", "Top right", "Bottom left", "Bottom right" };
+static const char *CORNER_STRS[]   = { "top-left", "top-right", "bottom-left", "bottom-right" };
+
 static void ui_render_settings_screen(SDL_Renderer *r,
                                       const AppConfig *cfg,
                                       int focus,
@@ -697,7 +702,7 @@ static void ui_render_settings_screen(SDL_Renderer *r,
     GROUP(LX, y, "CONNECTION");
     ROW(LX, y, SET_PS5, "PS5 console", on_off(cfg && cfg->ps5));
     ROW(LX, y, SET_WAKE_ON_START, "Wake console on connect", on_off(cfg && cfg->wakeup));
-    ROW(LX, y, SET_SLEEP_ON_EXIT, "Rest mode on exit", on_off(cfg && cfg->sleep_on_exit));
+    ROW(LX, y, SET_SLEEP_ON_EXIT, "Rest mode on exit", cfg ? SLEEP_LABELS[cfg->sleep_on_exit] : "Ask");
     y += GROUP_GAP;
     GROUP(LX, y, "ADVANCED");
     ROW(LX, y, SET_LOG_LEVEL, "Log level", LOG_LEVEL_LABELS[log_idx]);
@@ -711,6 +716,9 @@ static void ui_render_settings_screen(SDL_Renderer *r,
     ROW(RX, y, SET_MOTION, "Motion controls", on_off(cfg && cfg->motion));
     ROW(RX, y, SET_TRIGGERS, "Adaptive triggers", on_off(cfg && cfg->trigger_effects));
     ROW(RX, y, SET_BT_PATCH, "Bluetooth fix (DualSense)", on_off(cfg && cfg->dualsense_bt_patch));
+    y += GROUP_GAP;
+    GROUP(RX, y, "STREAM");
+    ROW(RX, y, SET_STATS_CORNER, "Stats overlay position", cfg ? CORNER_LABELS[cfg->stats_corner & 3] : CORNER_LABELS[0]);
     y += GROUP_GAP;
     draw_button(r, RX, y, COL_W, ROW_H + 6, "Back", focus == SET_RETURN, true);
 #undef ROW
@@ -810,60 +818,77 @@ void ui_render_loading(SDL_Renderer *r, const char *base_text)
  * Stats overlay
  * ══════════════════════════════════════════════════════════════════════════ */
 
-void ui_render_stats_overlay(SDL_Renderer *r, const char *text)
+/* Lines are "LABEL<2+ spaces>value"; the first line is the title.  Labels go
+ * in a dim left column, values in a second column.  corner: 0 top-left,
+ * 1 top-right, 2 bottom-left, 3 bottom-right. */
+void ui_render_stats_overlay(SDL_Renderer *r, const char *text, int corner)
 {
     if (!r || !text || !text[0]) return;
 
     int sw = SCREEN_W, sh = SCREEN_H;
     ui_screen_size(r, &sw, &sh);
-
-    const int scale  = 2;
-    const int pad    = 20;
     ui_text_init(r);
-    const int line_h = ui_text_line_height(scale_px(scale));
 
-    /* Measure (text_width measures up to the first '\n') */
-    int lines = 0, maxw = 0;
-    for (const char *p = text; p; ) {
-        int w = text_width(p, scale);
-        if (w > maxw) maxw = w;
-        lines++;
-        p = strchr(p, '\n');
-        if (p) p++;
+    const int px = 26, title_px = 22, pad = 22, gap = 24, margin = 36;
+    const int line_h = ui_text_line_height(px);
+
+    /* split into title + (label, value) rows */
+    char title[64] = "";
+    char labels[16][48], values[16][160];
+    int rows = 0, label_w = 0, value_w = 0;
+    const char *p = text;
+    for (int li = 0; p && rows < 16; li++) {
+        const char *nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) : strlen(p);
+        char line[256];
+        if (len >= sizeof(line)) len = sizeof(line) - 1;
+        memcpy(line, p, len); line[len] = '\0';
+        p = nl ? nl + 1 : NULL;
+        if (li == 0) { snprintf(title, sizeof(title), "%s", line); continue; }
+        char *sep = strstr(line, "  ");
+        if (sep) {
+            *sep = '\0';
+            char *v = sep + 2;
+            while (*v == ' ') v++;
+            snprintf(labels[rows], sizeof(labels[rows]), "%s", line);
+            snprintf(values[rows], sizeof(values[rows]), "%s", v);
+        } else {
+            labels[rows][0] = '\0';
+            snprintf(values[rows], sizeof(values[rows]), "%s", line);
+        }
+        int lw = ui_text_width(labels[rows], px, UI_FONT_REGULAR);
+        int vw = ui_text_width(values[rows], px, UI_FONT_SEMIBOLD);
+        if (lw > label_w) label_w = lw;
+        if (vw > value_w) value_w = vw;
+        rows++;
     }
 
-    int box_w = maxw + pad * 2 + 8;  /* +8 for left accent bar */
-    int box_h = lines * line_h + pad * 2;
-    if (box_w > sw - 40) box_w = sw - 40;
-    if (box_h > sh - 40) box_h = sh - 40;
+    int title_h = ui_text_line_height(title_px) + 10;
+    int box_w = pad * 2 + label_w + gap + value_w;
+    int box_h = pad * 2 + title_h + rows * line_h;
+    if (box_w > sw - 2 * margin) box_w = sw - 2 * margin;
 
-    int x = 24, y = 24;
+    int x = (corner == 1 || corner == 3) ? sw - margin - box_w : margin;
+    int y = (corner == 2 || corner == 3) ? sh - margin - box_h : margin;
 
     SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    set_color(r, 0x00, 0x00, 0x00, 90);
+    fill_rounded_rect(r, x + 4, y + 6, box_w, box_h, 18);
+    set_color(r, 0x05, 0x0a, 0x18, 215);
+    fill_rounded_rect(r, x, y, box_w, box_h, 18);
+    set_color(r, 0x2a, 0x3a, 0x66, 255);
+    stroke_rounded_rect(r, x, y, box_w, box_h, 18);
 
-    /* Shadow */
-    set_color(r, 0x00, 0x00, 0x00, 100);
-    fill_rounded_rect(r, x + 4, y + 4, box_w, box_h, 12);
-
-    /* Background */
-    set_color(r, 0x06, 0x0e, 0x24, 210);
-    fill_rounded_rect(r, x, y, box_w, box_h, 12);
-
-    /* Border */
-    set_color(r, COL_BORDER);
-    stroke_rounded_rect(r, x, y, box_w, box_h, 12);
-
-    /* Left accent bar */
-    set_color(r, COL_ACCENT);
-    fill_rect(r, x, y + 3, 4, box_h - 6);
-
-    /* Text */
-    set_color(r, COL_TEXT);
-    draw_text(r, x + pad + 8, y + pad, text, scale);
-
-    /* Top label */
-    set_color(r, COL_ACCENT_MID);
-    hline(r, x + 4, y + pad + lines * line_h + 6, box_w - 8);
+    SDL_Color accent = { 0x40, 0x9c, 0xff, 0xff };
+    SDL_Color dim    = { 0x8a, 0x9a, 0xc0, 0xff };
+    SDL_Color val    = { 0xec, 0xf2, 0xff, 0xff };
+    ui_text_draw(r, x + pad, y + pad, title, title_px, UI_FONT_BOLD, accent, UI_ALIGN_LEFT);
+    int ty = y + pad + title_h;
+    for (int i = 0; i < rows; i++) {
+        ui_text_draw(r, x + pad, ty, labels[i], px, UI_FONT_REGULAR, dim, UI_ALIGN_LEFT);
+        ui_text_draw(r, x + pad + label_w + gap, ty, values[i], px, UI_FONT_SEMIBOLD, val, UI_ALIGN_LEFT);
+        ty += line_h;
+    }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -955,7 +980,8 @@ static bool ui_write_settings_json(const char *config_path, const AppConfig *cfg
     SET_BOOL("ps5",           cfg->ps5);
     SET_BOOL("hw_decode",     cfg->hw_decode);
     SET_BOOL("wakeup",        cfg->wakeup);
-    SET_BOOL("sleep_on_exit", cfg->sleep_on_exit);
+    SET_STR("sleep_on_exit", SLEEP_STRS[cfg->sleep_on_exit]);
+    SET_STR("stats_corner",  CORNER_STRS[cfg->stats_corner & 3]);
     SET_STR ("video_codec",   (cfg->video_codec && cfg->video_codec[0]) ? cfg->video_codec : "h265");
     SET_STR ("log_level",     ui_log_level_to_string(cfg->log_level));
     SET_STR ("controller_profile", (cfg->controller_profile && cfg->controller_profile[0]) ? cfg->controller_profile : "auto");
@@ -1079,7 +1105,8 @@ static void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg,
                     else if (focus == SET_TRIGGERS)     { cfg->trigger_effects = !cfg->trigger_effects; changed = input_changed = true; }
                     else if (focus == SET_BT_PATCH)     { cfg->dualsense_bt_patch = !cfg->dualsense_bt_patch; changed = input_changed = true; }
                     else if (focus == SET_WAKE_ON_START){ cfg->wakeup      = !cfg->wakeup;      changed = true; }
-                    else if (focus == SET_SLEEP_ON_EXIT){ cfg->sleep_on_exit = !cfg->sleep_on_exit; changed = true; }
+                    else if (focus == SET_SLEEP_ON_EXIT){ cfg->sleep_on_exit = (cfg->sleep_on_exit + (fwd ? 1 : 2)) % 3; changed = true; }
+                    else if (focus == SET_STATS_CORNER) { cfg->stats_corner = (cfg->stats_corner + (fwd ? 1 : 3)) % 4; changed = true; }
                     else if (focus == SET_RETURN)       { wants_exit = true; continue; }
 
                     if (changed) {

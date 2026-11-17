@@ -23,6 +23,13 @@ typedef struct StreamStatsCounters
     // Optional latency reported by SS4S video backend (ms). Updated from the main thread.
     // -1 means unknown/unavailable.
     atomic_int video_latency_ms;
+
+    // Network figures from libchiaki, copied in by the main thread (-1 = unknown).
+    atomic_int rtt_ms;            // round trip time
+    atomic_int packet_loss_pm;    // packet loss, per mille
+    atomic_int frames_lost;       // video frames lost since the stream started
+    atomic_int target_kbps;       // bitrate requested from the console
+    atomic_uint started_ms;       // SDL ticks when the first video frame arrived (0 = not yet)
 } StreamStatsCounters;
 
 extern StreamStatsCounters g_stream_stats;
