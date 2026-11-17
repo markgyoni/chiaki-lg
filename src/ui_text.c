@@ -38,6 +38,7 @@ static const char *FONT_CANDIDATES[UI_FONT_COUNT][3] = {
     [UI_FONT_BOLD]     = { "/usr/share/fonts/LG_Smart_UI-Bold.ttf",
                            "/usr/share/fonts/LG_Smart_UI-SemiBold.ttf",
                            "/usr/share/fonts/DroidSans.ttf" },
+    [UI_FONT_ICON]     = { "assets/fa-solid-900.ttf", NULL, NULL },   /* relative to the app dir (cwd) */
 };
 
 /* Open fonts, one per (weight, size). */
@@ -235,7 +236,7 @@ bool ui_text_init(SDL_Renderer *r)
     for (int w = 0; w < UI_FONT_COUNT; w++)
         if (!g_font_files[w]) g_font_files[w] = g_font_files[UI_FONT_REGULAR];
     g_have_ttf = true;
-    app_log_always("[UI] text: %s\n", g_font_files[UI_FONT_REGULAR]);
+    app_log_always("[UI] text: %s, icons: %s\n", g_font_files[UI_FONT_REGULAR], g_font_files[UI_FONT_ICON]);
     return true;
 }
 

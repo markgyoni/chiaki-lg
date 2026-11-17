@@ -21,7 +21,7 @@ struct InputContext;
 void ui_set_launcher_notice(const char *text);
 
 /* Over the running stream: "Put the console in rest mode?"  Returns true for
- * rest mode; Back, no answer within 15 s or Home keeps it on. */
+ * rest mode; Back or Home keeps it on. */
 bool ui_ask_rest_mode(SDL_Renderer *renderer, struct InputContext *input);
 
 /* Start screen: the console list (connect, add, settings per console, remove),
@@ -33,6 +33,11 @@ UIResult ui_run_home(SDL_Renderer *renderer, AppConfig *cfg, const char *config_
 /* App settings screen (controllers, overlay, logging). */
 void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg, const char *config_path,
                      struct InputContext *input);
+
+/* Gamepad activity keeps the TV's screensaver away for 2 minutes (webOS does
+ * not see grabbed gamepads).  Call ui_keep_awake_tick() every frame. */
+void ui_note_pad_activity(void);
+void ui_keep_awake_tick(void);
 
 /* The notice set by ui_set_launcher_notice(), once (then cleared). */
 const char *ui_take_launcher_notice(void);

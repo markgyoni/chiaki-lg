@@ -11,7 +11,12 @@
 #include <SDL2/SDL.h>
 #include <stdbool.h>
 
-typedef enum { UI_FONT_REGULAR = 0, UI_FONT_SEMIBOLD, UI_FONT_BOLD, UI_FONT_COUNT } UiFontWeight;
+/* UI_FONT_ICON is Font Awesome Free (assets/fa-solid-900.ttf next to the app):
+ * pass the icon's code point as UTF-8, e.g. UI_ICON_TRASH. */
+typedef enum { UI_FONT_REGULAR = 0, UI_FONT_SEMIBOLD, UI_FONT_BOLD, UI_FONT_ICON, UI_FONT_COUNT } UiFontWeight;
+
+#define UI_ICON_TRASH "\xEF\x8B\xAD"     /* U+F2ED trash-can */
+#define UI_ICON_GEAR  "\xEF\x80\x93"     /* U+F013 gear */
 
 typedef enum { UI_ALIGN_LEFT = 0, UI_ALIGN_CENTER, UI_ALIGN_RIGHT } UiAlign;
 

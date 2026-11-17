@@ -194,7 +194,7 @@ On a DualSense (raw HID backend), the **Mute** button is not sent to the console
 | **Mute** (tap) | Toggle stats overlay |
 | **Mute** (hold 3 s) | Leave the stream and go back to the menu |
 
-With `Rest mode on exit = Ask`, leaving the stream (Back, Down twice, holding Mute) asks whether to put the console in rest mode; no answer within 15 s keeps it on.
+With `Rest mode on exit = Ask`, leaving the stream (Back, Down twice, holding Mute) asks whether to put the console in rest mode.
 
 ---
 

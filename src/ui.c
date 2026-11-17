@@ -1,4 +1,5 @@
 #include "ui.h"
+#include "keep_awake.h"
 #include "config.h"
 
 #include <SDL2/SDL.h>
@@ -68,7 +69,34 @@ void pad_nav_poll(struct InputContext *in)
         }
         if (down && MAP[i].repeat) held_dir = true;
     }
+    if (b != prev) ui_note_pad_activity();
     prev = b;
+    ui_keep_awake_tick();
+}
+
+/* ── Keep the TV awake while a gamepad is used ───────────────────────────────
+ * Gamepads are grabbed, so webOS never sees their input and starts its
+ * screensaver after a couple of idle minutes even while someone navigates
+ * the menus with a controller.  While there was gamepad activity in the last
+ * two minutes keep_awake_poke() resets webOS's screensaver/standby timers (SDL's own
+ * SDL_DisableScreenSaver does not reach them on webOS 6). */
+#define KEEP_AWAKE_MS 120000
+static Uint32 g_pad_activity_ms;
+static bool   g_screensaver_blocked;
+
+void ui_note_pad_activity(void)
+{
+    g_pad_activity_ms = SDL_GetTicks() | 1u;
+}
+
+void ui_keep_awake_tick(void)
+{
+    bool want = g_pad_activity_ms && SDL_GetTicks() - g_pad_activity_ms < KEEP_AWAKE_MS;
+    if (want) keep_awake_poke();             /* rate-limited, non-blocking */
+    if (want == g_screensaver_blocked) return;
+    g_screensaver_blocked = want;
+    app_log_always("[UI] screensaver %s (gamepad %s)\n", want ? "blocked" : "allowed",
+                   want ? "in use" : "idle for 2 min");
 }
 
 
@@ -265,7 +293,8 @@ void big_button(SDL_Renderer *r, int x, int y, int w, int h, const char *label,
 
 typedef enum {
     /* left column */
-    SET_STATS_CORNER = 0, /* STREAM */
+    SET_PSN = 0,          /* ACCOUNT */
+    SET_STATS_CORNER,     /* STREAM */
     SET_LOG_LEVEL,        /* ADVANCED */
     SET_INPUT_DEBUG,
     /* right column */
@@ -285,6 +314,7 @@ static const char *PROFILE_LABELS[]  = {"Automatic", "PlayStation (HID)", "PlayS
 #define N_PROFILES ((int)(sizeof(PROFILE_OPTIONS) / sizeof(PROFILE_OPTIONS[0])))
 
 static const char *SETTING_HELP[SET_COUNT] = {
+    [SET_PSN]           = "The PSN account used to link consoles (and for cloud wakeup). OK signs out; you sign in again the next time you link a console.",
     [SET_STATS_CORNER]  = "Where the stream stats appear. Show or hide them with Up on the remote or Mute on the DualSense.",
     [SET_LOG_LEVEL]     = "How much is written to /tmp/chiaki.log. Warning is enough unless you are debugging.",
     [SET_INPUT_DEBUG]   = "Log every raw controller event. Only for diagnosing controller problems.",
@@ -411,6 +441,9 @@ static void ui_render_settings_screen(SDL_Renderer *r, const AppConfig *cfg, int
         (y) += ROW_H + ROW_GAP; } while (0)
 
     int y = CONTENT_Y + 6;
+    GROUP(LX, y, "ACCOUNT");
+    ROW(LX, y, SET_PSN, "PlayStation Network", cfg->psn_account_id_b64 ? "Signed in" : "Not signed in");
+    y += GROUP_GAP;
     GROUP(LX, y, "STREAM");
     ROW(LX, y, SET_STATS_CORNER, "Stats overlay position", CORNER_LABELS[cfg->stats_corner & 3]);
     y += GROUP_GAP;
@@ -450,7 +483,7 @@ void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg, const char *config_
     int profile_idx = 0;
     for (int i = 0; i < N_PROFILES; i++)
         if (cfg->controller_profile && !strcmp(cfg->controller_profile, PROFILE_OPTIONS[i])) profile_idx = i;
-    int focus = SET_STATS_CORNER;
+    int focus = SET_PSN;
     bool input_changed = false, wants_exit = false;
     char msg[128] = {0};
 
@@ -470,6 +503,16 @@ void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg, const char *config_
                 if (!fwd && !back) continue;
                 bool changed = true;
                 switch (focus) {
+                case SET_PSN:
+                    if (sym != SDLK_RETURN && sym != SDLK_KP_ENTER) { changed = false; break; }
+                    if (cfg->psn_account_id_b64) {
+                        config_set_str(&cfg->psn_account_id_b64, NULL);
+                        config_set_str(&cfg->psn_refresh_token, NULL);
+                        app_log_always("[UI] signed out of PSN\n");
+                    } else if (!ui_psn_sign_in(renderer, input, cfg, config_path)) {
+                        changed = false;
+                    }
+                    break;
                 case SET_STATS_CORNER: cfg->stats_corner = (cfg->stats_corner + (fwd ? 1 : 3)) % 4; break;
                 case SET_LOG_LEVEL:    log_idx = (log_idx + (fwd ? 1 : 5)) % 6; cfg->log_level = LOG_LEVEL_MASKS[log_idx]; break;
                 case SET_INPUT_DEBUG:  cfg->input_debug = !cfg->input_debug; input_changed = true; break;
@@ -721,8 +764,6 @@ bool ui_ask_rest_mode(SDL_Renderer *r, struct InputContext *input)
 {
     if (!r) return false;
     ui_text_init(r);
-    const Uint32 TIMEOUT_MS = 15000;          /* no answer: keep the console on */
-    Uint32 t0 = SDL_GetTicks();
     int focus = 1;                             /* 0 = Rest mode, 1 = Keep on */
     int answer = -1;
     SDL_Event ev;
@@ -739,8 +780,6 @@ bool ui_ask_rest_mode(SDL_Renderer *r, struct InputContext *input)
             if (k == SDLK_RETURN || k == SDLK_KP_ENTER) { answer = focus == 0; break; }
             if (k == SDLK_ESCAPE || k == WEBOS_KEY_BACK || k == WEBOS_KEY_RED) { answer = 0; break; }
         }
-        Uint32 el = SDL_GetTicks() - t0;
-        if (answer < 0 && el >= TIMEOUT_MS) answer = 0;
 
         /* dim the (still running) video, then the dialog */
         SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
@@ -748,19 +787,15 @@ bool ui_ask_rest_mode(SDL_Renderer *r, struct InputContext *input)
         fill_rect(r, 0, 0, SCREEN_W, SCREEN_H);
         SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
 
-        const int BW = 900, BH = 380, BX = (SCREEN_W - BW) / 2, BY = (SCREEN_H - BH) / 2;
+        const int BW = 900, BH = 300, BX = (SCREEN_W - BW) / 2, BY = (SCREEN_H - BH) / 2;
         set_color(r, COL_PANEL);
         fill_rounded_rect(r, BX, BY, BW, BH, 24);
         set_color(r, COL_BORDER);
         stroke_rounded_rect(r, BX, BY, BW, BH, 24);
-        ui_text_draw(r, SCREEN_W / 2, BY + 48, "Put the console in rest mode?", 44, UI_FONT_BOLD,
+        ui_text_draw(r, SCREEN_W / 2, BY + 50, "Put the console in rest mode?", 44, UI_FONT_BOLD,
                      C(COL_TEXT), UI_ALIGN_CENTER);
-        char sub[96];
-        snprintf(sub, sizeof(sub), "Leaving the stream. Keeping it on in %u s.",
-                 (unsigned)((TIMEOUT_MS - (el < TIMEOUT_MS ? el : TIMEOUT_MS) + 999) / 1000));
-        ui_text_draw(r, SCREEN_W / 2, BY + 116, sub, 28, UI_FONT_REGULAR, C(COL_TEXT_DIM), UI_ALIGN_CENTER);
 
-        const int W = 340, H = 104, GAP = 40, Y = BY + BH - H - 50;
+        const int W = 340, H = 104, GAP = 40, Y = BY + BH - H - 44;
         int x0 = SCREEN_W / 2 - W - GAP / 2;
         big_button(r, x0, Y, W, H, "Rest mode", focus == 0, true, false);
         big_button(r, x0 + W + GAP, Y, W, H, "Keep on", focus == 1, true, false);

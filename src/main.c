@@ -1686,6 +1686,19 @@ int main(int argc, char *argv[])
                 if (g_session_ended || g_should_exit)
                     break;
 
+                // Gamepad input during the stream also keeps the TV's screensaver /
+                // no-operation timers away (webOS doesn't see grabbed pads).
+                {
+                    static uint32_t last_buttons;
+                    ChiakiControllerState pst;
+                    input_get_state(input_ctx, &pst);
+                    if (pst.buttons != last_buttons || pst.left_x > 8000 || pst.left_x < -8000 ||
+                        pst.right_x > 8000 || pst.right_x < -8000 || pst.r2_state > 30)
+                        ui_note_pad_activity();
+                    last_buttons = pst.buttons;
+                    ui_keep_awake_tick();
+                }
+
                 // DualSense mute button: tap → stats overlay, hold 3 s → menu.
                 int mute = input_take_mute_event(input_ctx, MUTE_HOLD_MS);
                 if (mute == INPUT_MUTE_TAP && g_have_video_frame)

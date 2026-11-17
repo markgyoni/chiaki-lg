@@ -1,4 +1,6 @@
 #include "ui_padtest.h"
+#include "ui.h"
+#include <stdlib.h>
 #include "ui_text.h"
 #include "input.h"
 
@@ -311,6 +313,15 @@ void ui_run_padtest(SDL_Renderer *r, struct InputContext *in)
 
         ChiakiControllerState st;
         input_get_state(in, &st);
+        {   /* any button or stick movement keeps the screensaver away */
+            static ChiakiControllerState last;
+            if (st.buttons != last.buttons || abs(st.left_x - last.left_x) > 4000 || abs(st.left_y - last.left_y) > 4000 ||
+                abs(st.right_x - last.right_x) > 4000 || abs(st.right_y - last.right_y) > 4000 ||
+                st.l2_state != last.l2_state || st.r2_state != last.r2_state)
+                ui_note_pad_activity();
+            last = st;
+            ui_keep_awake_tick();
+        }
         Uint32 now = SDL_GetTicks();
         if (rumble_until && (Sint32)(now - rumble_until) >= 0) { input_set_rumble(in, 0, 0); rumble_until = 0; }
         if (on(&st, CHIAKI_CONTROLLER_BUTTON_PS)) {

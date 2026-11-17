@@ -262,7 +262,7 @@ static void login_job(void *p)
 }
 
 /* Gets the PSN account ID (needed once, for every console). */
-static bool psn_sign_in(SDL_Renderer *r, struct InputContext *in, AppConfig *cfg, const char *config_path)
+bool ui_psn_sign_in(SDL_Renderer *r, struct InputContext *in, AppConfig *cfg, const char *config_path)
 {
     char msg[256] = "";
     int focus = 0;                               /* 0 Enter code, 1 Cancel */
@@ -352,7 +352,7 @@ static void regist_job(void *p)
 static bool pair_console(SDL_Renderer *r, struct InputContext *in, ChiakiLog *log, AppConfig *cfg,
                          const char *config_path, const char *host, bool ps5, int target, RegistResult *out)
 {
-    if (!cfg->psn_account_id_b64 && !psn_sign_in(r, in, cfg, config_path))
+    if (!cfg->psn_account_id_b64 && !ui_psn_sign_in(r, in, cfg, config_path))
         return false;
     char help[512];
     snprintf(help, sizeof(help),
@@ -673,6 +673,17 @@ done:
 
 /* ── start screen ──────────────────────────────────────────────────────────── */
 
+/* Square button with a Font Awesome icon (assets/fa-solid-900.ttf). */
+static void icon_button(SDL_Renderer *r, int x, int y, int w, int h, const char *icon, bool focused)
+{
+    if (focused) { set_color(r, COL_TEXT); fill_rounded_rect(r, x - 4, y - 4, w + 8, h + 8, 16); }
+    if (focused) set_color(r, COL_ACCENT); else set_color(r, COL_CARD);
+    fill_rounded_rect(r, x, y, w, h, 14);
+    const int px = 40;
+    ui_text_draw(r, x + w / 2, y + (h - ui_text_line_height(px)) / 2, icon, px, UI_FONT_ICON,
+                 focused ? C(COL_TEXT) : C(COL_TEXT_DIM), UI_ALIGN_CENTER);
+}
+
 enum { HC_CARD = 0, HC_SETTINGS, HC_REMOVE };
 
 static void draw_controllers(SDL_Renderer *r, struct InputContext *in, int x, int y, int w)
@@ -780,7 +791,7 @@ UIResult ui_run_home(SDL_Renderer *r, AppConfig *cfg, const char *config_path,
         int y = 150;
         ui_text_draw(r, M, y, "Consoles", 30, UI_FONT_SEMIBOLD, C(COL_TEXT_DIM), UI_ALIGN_LEFT);
         y += 50;
-        const int CH = 112, GAP = 16, BW = 200, CW = LW - 2 * (BW + 16);
+        const int CH = 112, GAP = 16, BW = 200, IW = 112, CW = LW - (BW + 16) - (IW + 16);
         /* scroll so the focused row stays visible */
         int visible = 5, first = 0;
         if (row < n && row >= visible) first = row - visible + 1;
@@ -807,7 +818,7 @@ UIResult ui_run_home(SDL_Renderer *r, AppConfig *cfg, const char *config_path,
                             : "Not found on the network");
             ui_text_draw_fit(r, M + 66, y + 66, CW - 90, sub, 26, UI_FONT_REGULAR, fc ? C(COL_TEXT) : C(COL_TEXT_DIM));
             big_button(r, M + CW + 16, y + 6, BW, CH - 12, "Settings", row == i && col == HC_SETTINGS, true, false);
-            big_button(r, M + CW + 16 + BW + 16, y + 6, BW, CH - 12, "Remove", row == i && col == HC_REMOVE, true, false);
+            icon_button(r, M + CW + 16 + BW + 16, y + 6, IW, CH - 12, UI_ICON_TRASH, row == i && col == HC_REMOVE);
         }
         /* + Add console */
         {

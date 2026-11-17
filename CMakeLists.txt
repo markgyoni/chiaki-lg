@@ -140,6 +140,7 @@ add_executable(chiaki-webos
     src/ui_padtest.c
     src/ui_home.c
     src/console_net.c
+    src/keep_awake.c
     src/psn_login.c
     src/third_party/qrcodegen.c
 )
@@ -218,6 +219,9 @@ target_link_options(chiaki-webos PRIVATE
 
 # ── Install ───────────────────────────────────────────────────────────────────
 install(TARGETS chiaki-webos paddiag btfix RUNTIME DESTINATION .)
+# Font Awesome Free (SIL OFL 1.1): the trash-can icon in the console list
+install(PROGRAMS tools/keepawake.sh DESTINATION .)
+install(FILES packaging/assets/fa-solid-900.ttf packaging/assets/FONT-AWESOME-LICENSE.txt DESTINATION assets)
 install(FILES
     packaging/appinfo.json
     packaging/icon.png
