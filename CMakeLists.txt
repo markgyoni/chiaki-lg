@@ -136,6 +136,7 @@ add_executable(chiaki-webos
     src/pad_profile.c
     src/pad_output.c
     src/dualsense.c
+    src/bt_patch.c
 )
 
 # ── Version ───────────────────────────────────────────────────────────────────
@@ -163,6 +164,10 @@ target_compile_definitions(chiaki-webos PRIVATE
 # Standalone controller diagnostics CLI (run over SSH on the TV; see tools/paddiag.c)
 add_executable(paddiag tools/paddiag.c src/pad_diag.c)
 target_include_directories(paddiag PRIVATE src/)
+
+# Root helper that fixes DualSense output over Bluetooth on LG webOS (see
+# tools/btfix.c, src/bt_patch.h).  Run by the app through the Homebrew Channel.
+add_executable(btfix tools/btfix.c)
 
 # Embed rpath so the binary finds ss4s module .so files in lib/ next to itself
 set_target_properties(chiaki-webos PROPERTIES
@@ -207,7 +212,7 @@ target_link_options(chiaki-webos PRIVATE
 )
 
 # ── Install ───────────────────────────────────────────────────────────────────
-install(TARGETS chiaki-webos paddiag RUNTIME DESTINATION .)
+install(TARGETS chiaki-webos paddiag btfix RUNTIME DESTINATION .)
 install(FILES
     packaging/appinfo.json
     packaging/icon.png
@@ -226,7 +231,7 @@ set(IPK_STAGING_DIR "${CMAKE_BINARY_DIR}/ipk-staging")
 set(APP_ID "org.homebrew.chiaki")
 
 add_custom_target(ipk
-    DEPENDS chiaki-webos paddiag
+    DEPENDS chiaki-webos paddiag btfix
 
     COMMAND ${CMAKE_COMMAND} -E make_directory "${IPK_STAGING_DIR}"
     COMMAND ${CMAKE_COMMAND} --install "${CMAKE_BINARY_DIR}" --prefix "${IPK_STAGING_DIR}"

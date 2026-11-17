@@ -12,6 +12,8 @@ typedef struct {
     bool        rumble;            // config "rumble"
     bool        dualsense_hid;     // config "dualsense_hid": raw HID backend for DualSense
     bool        motion;            // config "motion": forward DualSense gyro/accel
+    bool        trigger_effects;   // config "trigger_effects": DualSense adaptive triggers
+    bool        dualsense_bt_patch; // config "dualsense_bt_patch": run btfix for BT DualSense outputs
 } InputOptions;
 
 InputContext *input_init(const InputOptions *opt);
@@ -35,6 +37,14 @@ void input_push_haptics(InputContext *ctx, const uint8_t *buf, size_t buf_size);
 
 // CHIAKI_EVENT_MOTION_RESET: re-zero the orientation of motion-capable pads.
 void input_motion_reset(InputContext *ctx);
+
+// DualSense outputs from the PS5 (all non-blocking; the input thread sends them).
+void input_set_trigger_effects(InputContext *ctx, uint8_t type_l, const uint8_t l[10],
+                               uint8_t type_r, const uint8_t r[10]);
+void input_set_lightbar(InputContext *ctx, uint8_t r, uint8_t g, uint8_t b);
+void input_set_player_index(InputContext *ctx, uint8_t index);
+// triggers=false: vibration intensity.  level: 0 Off, 1 Strong, 2 Medium, 3 Weak.
+void input_set_effect_intensity(InputContext *ctx, bool triggers, int level);
 
 // Handle SDL keyboard events from the TV remote only.
 // Gamepad buttons/axes are handled internally via direct evdev + EVIOCGRAB.

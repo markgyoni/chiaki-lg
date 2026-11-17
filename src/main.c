@@ -147,6 +147,23 @@ static void session_event_cb(ChiakiEvent *event, void *user)
     case CHIAKI_EVENT_MOTION_RESET:
         input_motion_reset(g_input_ctx);
         break;
+    case CHIAKI_EVENT_TRIGGER_EFFECTS:
+        input_set_trigger_effects(g_input_ctx,
+                                  event->trigger_effects.type_left, event->trigger_effects.left,
+                                  event->trigger_effects.type_right, event->trigger_effects.right);
+        break;
+    case CHIAKI_EVENT_LED_COLOR:
+        input_set_lightbar(g_input_ctx, event->led_state[0], event->led_state[1], event->led_state[2]);
+        break;
+    case CHIAKI_EVENT_PLAYER_INDEX:
+        input_set_player_index(g_input_ctx, event->player_index);
+        break;
+    case CHIAKI_EVENT_HAPTIC_INTENSITY:
+        input_set_effect_intensity(g_input_ctx, false, (int)event->intensity);
+        break;
+    case CHIAKI_EVENT_TRIGGER_INTENSITY:
+        input_set_effect_intensity(g_input_ctx, true, (int)event->intensity);
+        break;
     case CHIAKI_EVENT_QUIT:
         // Log the reason so we can diagnose what triggered the disconnect.
         app_log_always("[APP] Session quit: reason=%d (%s) reason_str=%s\n",
@@ -1270,6 +1287,8 @@ int main(int argc, char *argv[])
         .rumble = cfg.rumble,
         .dualsense_hid = cfg.dualsense_hid,
         .motion = cfg.motion,
+        .trigger_effects = cfg.trigger_effects,
+        .dualsense_bt_patch = cfg.dualsense_bt_patch,
     };
     InputContext *input_ctx = input_init(&input_opt);
     g_input_ctx = input_ctx;

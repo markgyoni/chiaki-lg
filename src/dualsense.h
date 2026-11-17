@@ -83,3 +83,42 @@ void ds_motion_init(DsMotion *m, const DsCalib *cal);
 void ds_motion_update(DsMotion *m, const DsInputState *s, ChiakiControllerState *st);
 /* CHIAKI_EVENT_MOTION_RESET: re-zero orientation around the current pose. */
 void ds_motion_reset(DsMotion *m);
+
+/* ── Outputs (Stage 7): rumble, adaptive triggers, lightbar, player LEDs ──── */
+
+/* Minimum gap between two output reports.  On webOS Bluetooth two reports
+ * landing a few ms apart wedged the pad's input stream until it was power-
+ * cycled; one report per input-thread tick (30 ms) is plenty for rumble. */
+#define DS_OUTPUT_MIN_INTERVAL_BT_MS   25
+#define DS_OUTPUT_MIN_INTERVAL_USB_MS   8
+
+typedef struct {
+    int      fd;            /* hidraw, borrowed */
+    bool     bt;            /* Bluetooth: report 0x31 + CRC32; USB: report 0x02 */
+    uint8_t  seq;
+    long     last_write_ms; /* CLOCK_MONOTONIC of the last report sent, 0 = never */
+
+    bool     setup_done;    /* lightbar fade-out sent (takes over from firmware) */
+
+    uint8_t  motor_strong, motor_weak;      bool rumble_dirty;
+    uint8_t  trig_l[11], trig_r[11];        bool trig_dirty;   /* [0] mode, [1..10] params */
+    uint8_t  intensity;                     bool intensity_dirty; /* hi nibble trigger, lo nibble rumble reduction */
+    uint8_t  led[3];                        bool led_dirty;
+    uint8_t  player_leds;                   bool player_dirty;
+} DsOutput;
+
+void ds_output_init(DsOutput *o, int fd, bool bluetooth);
+void ds_output_set_rumble(DsOutput *o, uint8_t strong, uint8_t weak);
+/* type/params as in ChiakiTriggerEffectsEvent (DualSense effect mode + 10 bytes). */
+void ds_output_set_triggers(DsOutput *o, uint8_t type_l, const uint8_t *l, uint8_t type_r, const uint8_t *r);
+void ds_output_triggers_off(DsOutput *o);
+void ds_output_set_intensity(DsOutput *o, uint8_t intensity);
+void ds_output_set_lightbar(DsOutput *o, uint8_t r, uint8_t g, uint8_t b);
+void ds_output_set_player(DsOutput *o, uint8_t player_index);
+/* Send one output report carrying everything that changed.  If the previous
+ * report went out less than the minimum interval ago nothing is sent and the
+ * changes stay pending for the next call.  Returns false if the write failed. */
+bool ds_output_flush(DsOutput *o);
+/* Like ds_output_flush but waits out the minimum interval first, so the report
+ * is always sent.  For shutdown paths (motors/triggers off). */
+bool ds_output_flush_sync(DsOutput *o);

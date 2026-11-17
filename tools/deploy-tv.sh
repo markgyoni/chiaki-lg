@@ -18,6 +18,6 @@ ssh "$HOST" "luna-send -n 1 luna://com.webos.applicationManager/closeByAppId '{\
 
 # Ship the app files only (never '.', whose owner/mode would replace the app
 # dir's, and never config.json / credentials, which live only on the TV).
-FILES=$(cd "$STAGING" && ls -d chiaki-webos paddiag appinfo.json icon.png largeIcon.png lib 2>/dev/null | tr '\n' ' ')
-tar -C "$STAGING" -cf - $FILES | ssh "$HOST" "tar -C $APP_DIR -xof - && cd $APP_DIR && chown -R root:root $FILES && chmod 755 chiaki-webos lib && chmod 755 paddiag 2>/dev/null; ls -la $APP_DIR"
+FILES=$(cd "$STAGING" && ls -d chiaki-webos paddiag btfix appinfo.json icon.png largeIcon.png lib 2>/dev/null | tr '\n' ' ')
+tar -C "$STAGING" -cf - $FILES | ssh "$HOST" "tar -C $APP_DIR -xof - && cd $APP_DIR && chown -R root:root $FILES && chmod 755 chiaki-webos lib && chmod 755 paddiag btfix 2>/dev/null; ls -la $APP_DIR"
 echo "Deployed to $HOST:$APP_DIR"
