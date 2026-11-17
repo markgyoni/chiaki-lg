@@ -863,6 +863,20 @@ void ui_render_stats_overlay(SDL_Renderer *r, const char *text, int corner)
         rows++;
     }
 
+    /* Keep the box still while numbers change: the value column is at least as
+     * wide as a worst-case sample, and never shrinks during the app's run. */
+    static int value_w_max;
+    static const char *const WIDEST[] = {
+        "3840x2160  H.265 HDR", "000.0 fps (target 120)", "000.0 Mbps  (audio 0.00)",
+        "000 ms", "00.0 %   Frames lost: 00000", "000 ms (00 frames)   errors 000", "00:00:00",
+    };
+    for (size_t i = 0; i < sizeof(WIDEST) / sizeof(WIDEST[0]); i++) {
+        int w = ui_text_width(WIDEST[i], px, UI_FONT_SEMIBOLD);
+        if (w > value_w) value_w = w;
+    }
+    if (value_w > value_w_max) value_w_max = value_w;
+    value_w = value_w_max;
+
     int title_h = ui_text_line_height(title_px) + 10;
     int box_w = pad * 2 + label_w + gap + value_w;
     int box_h = pad * 2 + title_h + rows * line_h;

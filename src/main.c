@@ -1735,7 +1735,6 @@ int main(int argc, char *argv[])
                             atomic_store_explicit(&g_stream_stats.frames_lost,
                                                   chiaki_video_receiver_get_frames_lost_total(g_session.stream_connection.video_receiver),
                                                   memory_order_relaxed);
-                        atomic_store_explicit(&g_stream_stats.target_kbps, cfg.video_bitrate, memory_order_relaxed);
                         atomic_store_explicit(&g_stream_stats.started_ms, stream_start_ms, memory_order_relaxed);
 
                         int lat_us = 0;

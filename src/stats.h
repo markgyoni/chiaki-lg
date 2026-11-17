@@ -28,7 +28,6 @@ typedef struct StreamStatsCounters
     atomic_int rtt_ms;            // round trip time
     atomic_int packet_loss_pm;    // packet loss, per mille
     atomic_int frames_lost;       // video frames lost since the stream started
-    atomic_int target_kbps;       // bitrate requested from the console
     atomic_uint started_ms;       // SDL ticks when the first video frame arrived (0 = not yet)
 } StreamStatsCounters;
 

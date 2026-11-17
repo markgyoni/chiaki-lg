@@ -143,7 +143,6 @@ void stats_overlay_update(StatsOverlay *o, const StreamStatsCounters *c, uint32_
     int rtt = atomic_load_explicit(&c->rtt_ms, memory_order_relaxed);
     int loss_pm = atomic_load_explicit(&c->packet_loss_pm, memory_order_relaxed);
     int lost = atomic_load_explicit(&c->frames_lost, memory_order_relaxed);
-    int target_kbps = atomic_load_explicit(&c->target_kbps, memory_order_relaxed);
     unsigned started = atomic_load_explicit(&c->started_ms, memory_order_relaxed);
 
     char latency[48], net[64], loss[48], up[32];
@@ -168,14 +167,14 @@ void stats_overlay_update(StatsOverlay *o, const StreamStatsCounters *c, uint32_
         "STREAM STATS\n"
         "Video        %dx%d  %s\n"
         "Frame rate   %.1f fps (target %d)\n"
-        "Bitrate      %.1f Mbps of %.0f  (audio %.2f)\n"
+        "Bitrate      %.1f Mbps  (audio %.2f)\n"
         "Network RTT  %s\n"
         "Packet loss  %s\n"
         "Decoder      %s   errors %llu\n"
         "Session      %s",
         vw, vh, codec_to_str(vcodec),
         o->fps, vfps_cfg,
-        o->mbps_total, target_kbps / 1000.0, o->mbps_audio,
+        o->mbps_total, o->mbps_audio,
         net,
         loss,
         latency, (unsigned long long)o->feed_fail_total,
