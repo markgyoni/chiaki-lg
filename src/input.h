@@ -61,6 +61,12 @@ void input_push_haptics(InputContext *ctx, const uint8_t *buf, size_t buf_size);
 // CHIAKI_EVENT_MOTION_RESET: re-zero the orientation of motion-capable pads.
 void input_motion_reset(InputContext *ctx);
 
+// DualSense mute button.  Returns INPUT_MUTE_TAP once after a short press,
+// INPUT_MUTE_HOLD once when it has been held for hold_ms (the release that
+// follows is not a tap).  Cleared by input_set_session().
+enum { INPUT_MUTE_NONE = 0, INPUT_MUTE_TAP, INPUT_MUTE_HOLD };
+int input_take_mute_event(InputContext *ctx, int hold_ms);
+
 // DualSense outputs from the PS5 (all non-blocking; the input thread sends them).
 void input_set_trigger_effects(InputContext *ctx, uint8_t type_l, const uint8_t l[10],
                                uint8_t type_r, const uint8_t r[10]);

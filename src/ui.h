@@ -25,13 +25,17 @@ struct InputContext;
  * could not start).  Contains "ailed" → drawn in the error colour. */
 void ui_set_launcher_notice(const char *text);
 
+/* Over the running stream: "Put the console in rest mode?"  Returns true for
+ * rest mode; Back, no answer within 15 s or Home keeps it on. */
+bool ui_ask_rest_mode(SDL_Renderer *renderer, struct InputContext *input);
+
 UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
                              const char *config_path, ChiakiLog *log,
                              struct InputContext *input);
 
 // Draw a semi-transparent stats overlay on top of the current frame.
 // This draws, but does NOT call SDL_RenderPresent().
-void ui_render_stats_overlay(SDL_Renderer *renderer, const char *text);
+void ui_render_stats_overlay(SDL_Renderer *renderer, const char *text, int corner); /* 0 TL, 1 TR, 2 BL, 3 BR */
 
 // Draw temporary pop up at launch for stats overlay
 void ui_render_hint(SDL_Renderer *r, const char *text, float opacity);

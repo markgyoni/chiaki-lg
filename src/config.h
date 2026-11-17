@@ -1,6 +1,8 @@
 #pragma once
 #include <stdbool.h>
 
+enum { SLEEP_OFF = 0, SLEEP_ON = 1, SLEEP_ASK = 2 };
+
 typedef struct {
     char    *host;
     char    *psn_account_id_b64;
@@ -18,7 +20,8 @@ typedef struct {
     bool     wakeup;
     char    *ps5_mac;
     int      wakeup_delay_ms;
-    bool     sleep_on_exit;
+    int      sleep_on_exit;     // rest mode when leaving: SLEEP_OFF / SLEEP_ON / SLEEP_ASK
+    int      stats_corner;      // stats overlay corner: 0 top-left, 1 top-right, 2 bottom-left, 3 bottom-right
     char    *ss4s_module;
     int      log_level;         // chiaki bitmask: DEBUG=1 VERBOSE=2 INFO=4 WARNING=8 ERROR=16
     // PSN cloud wakeup — needed when PS5 ignores local UDP wakeup (port 987).
