@@ -14,6 +14,7 @@
 #include <sys/select.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <pthread.h>
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_syswm.h>
@@ -991,6 +992,189 @@ static bool should_reconnect(ChiakiQuitReason reason)
     }
 }
 
+// ── Loading screen that keeps animating ───────────────────────────────────────
+// Blocking work (PSN HTTP calls, the wakeup probe, retry back-off) used to run
+// on the main thread between loading-screen frames, so the spinner froze for
+// up to several seconds.  The work now runs on a worker thread while the main
+// thread renders at ~60 fps and keeps polling SDL events.
+
+static const char *volatile g_loading_text = "Connecting";
+static volatile bool g_return_to_menu = false;   // stream → launcher, not app exit
+
+static bool is_remote_back(SDL_Keycode k)
+{
+    return k == (SDL_Keycode)1073742094 /* WEBOS_KEY_BACK */ || k == SDLK_ESCAPE;
+}
+
+// Handle events while a loading screen is up: Home quits the app, Back
+// cancels the connection and returns to the launcher.
+static void loading_poll_events(void)
+{
+    SDL_Event ev;
+    while (SDL_PollEvent(&ev)) {
+        if (ev.type == SDL_QUIT) {
+            g_should_exit = true;
+        } else if (ev.type == SDL_KEYDOWN && !ev.key.repeat && is_remote_back(ev.key.keysym.sym)) {
+            app_log_always("[APP] Back during loading — returning to the menu\n");
+            g_return_to_menu = true;
+        }
+    }
+}
+
+static void loading_frame(void)
+{
+    loading_poll_events();
+    ui_render_loading(g_renderer, g_loading_text);
+    SDL_RenderPresent(g_renderer);
+    SDL_Delay(16);
+}
+
+// Keep the spinner running for `ms` (back-off between retries).
+static void loading_wait(Uint32 ms)
+{
+    Uint32 end = SDL_GetTicks() + ms;
+    while (!g_should_exit && !g_return_to_menu && (Sint32)(end - SDL_GetTicks()) > 0)
+        loading_frame();
+}
+
+typedef struct {
+    void (*fn)(void *);
+    void *arg;
+    volatile bool done;
+} LoadingJob;
+
+static void *loading_job_thread(void *p)
+{
+    LoadingJob *job = p;
+    job->fn(job->arg);
+    job->done = true;
+    return NULL;
+}
+
+// Run fn(arg) on a worker thread; the main thread animates the loading screen
+// until it finishes.  fn should return early once g_should_exit or
+// g_return_to_menu is set.
+static void run_with_loading(void (*fn)(void *), void *arg)
+{
+    LoadingJob job = { fn, arg, false };
+    pthread_t t;
+    if (pthread_create(&t, NULL, loading_job_thread, &job) != 0) {
+        fn(arg);
+        return;
+    }
+    while (!job.done)
+        loading_frame();
+    pthread_join(t, NULL);
+}
+
+typedef struct {
+    AppConfig *cfg;
+    ChiakiLog *log;
+} WakeupJob;
+
+// One TCP connect attempt to the Remote Play port (9295), waiting up to
+// timeout_ms.  Open means the PS5 is awake and ready for a session.
+static bool probe_ps5(const struct sockaddr_in *sa, int timeout_ms)
+{
+    int probe = socket(AF_INET, SOCK_STREAM, 0);
+    if (probe < 0)
+    {
+        app_log("[WAKEUP] probe: socket() failed: %s\n", strerror(errno));
+        return false;
+    }
+    int flags = fcntl(probe, F_GETFL, 0);
+    fcntl(probe, F_SETFL, flags | O_NONBLOCK);
+
+    bool open_ = false;
+    int rc = connect(probe, (const struct sockaddr *)sa, sizeof(*sa));
+    if (rc == 0)
+    {
+        open_ = true;
+    }
+    else if (errno == EINPROGRESS)
+    {
+        fd_set wfds;
+        FD_ZERO(&wfds);
+        FD_SET(probe, &wfds);
+        struct timeval tv = { .tv_sec = timeout_ms / 1000, .tv_usec = (timeout_ms % 1000) * 1000 };
+        int sel = select(probe + 1, NULL, &wfds, NULL, &tv);
+        if (sel > 0)
+        {
+            int err2 = 0;
+            socklen_t len = sizeof(err2);
+            getsockopt(probe, SOL_SOCKET, SO_ERROR, &err2, &len);
+            if (err2 == 0)
+                open_ = true;
+            else
+                app_log("[WAKEUP] probe: %s (errno=%d)\n",
+                        err2 == ECONNREFUSED ? "ECONNREFUSED — PS5 NIC up, port 9295 closed"
+                                             : strerror(err2), err2);
+        }
+        else if (sel == 0)
+            app_log("[WAKEUP] probe: select timeout — PS5 not yet reachable\n");
+        else
+            app_log("[WAKEUP] probe: select error: %s\n", strerror(errno));
+    }
+    else
+    {
+        app_log("[WAKEUP] probe: connect immediate error: %s (errno=%d)\n", strerror(errno), errno);
+    }
+    close(probe);
+    return open_;
+}
+
+// Wakeup (PSN cloud or UDP), then poll TCP 9295 until the PS5 answers.
+// Runs on the loading worker thread: no SDL rendering in here.
+static void wakeup_job(void *p)
+{
+    WakeupJob *w = p;
+    AppConfig *cfg = w->cfg;
+
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port   = htons(9295);
+    inet_pton(AF_INET, cfg->host, &sa.sin_addr);
+
+    // Already awake: skip the wakeup.  A PSN cloud wakeup creates a Remote
+    // Play session on the console, so connecting right after it got "Remote
+    // Play on Console is already in use" and cost a 4 s retry every time.
+    if (probe_ps5(&sa, 400))
+    {
+        app_log_always("[WAKEUP] PS5 already awake (port 9295 open) — no wakeup needed\n");
+        return;
+    }
+
+    g_loading_text = "Waking console";
+    if (cfg->psn_refresh_token && cfg->psn_refresh_token[0])
+        do_psn_wakeup(cfg, w->log);
+    else
+        do_wakeup(cfg, w->log);
+
+    Uint32 deadline    = SDL_GetTicks() + (Uint32)cfg->wakeup_delay_ms;
+    Uint32 next_wakeup = SDL_GetTicks() + 5000;
+    app_log_always("[WAKEUP] Waiting up to %dms for PS5 to become ready...\n", cfg->wakeup_delay_ms);
+
+    bool ps5_ready = false;
+    while (!g_should_exit && !g_return_to_menu && (Sint32)(deadline - SDL_GetTicks()) > 0)
+    {
+        if ((Sint32)(SDL_GetTicks() - next_wakeup) >= 0)
+        {
+            do_wakeup(cfg, w->log);
+            next_wakeup = SDL_GetTicks() + 5000;
+        }
+        if (probe_ps5(&sa, 1000))
+        {
+            app_log_always("[WAKEUP] PS5 is ready (port 9295 open)\n");
+            ps5_ready = true;
+            break;
+        }
+        usleep(500 * 1000);
+    }
+    if (!ps5_ready && !g_should_exit && !g_return_to_menu)
+        app_log_always("[WAKEUP] Deadline reached — attempting connection anyway\n");
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 int main(int argc, char *argv[])
@@ -1178,518 +1362,410 @@ int main(int argc, char *argv[])
     };
     InputContext *input_ctx = input_init(&input_opt);
 
-    app_log("[APP] Showing launcher UI\n");
-    SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);  // opaque for UI
-    SDL_RenderClear(g_renderer);
-    SDL_RenderPresent(g_renderer);
-    SDL_SetWindowSize(g_window, cfg.video_width, cfg.video_height);
-    UIResult ui_result = ui_run_registration(g_renderer, &cfg, config_path, &chiaki_log, input_ctx);
-
-    // Back to transparent so NDL plane shows through during stream
-    SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_NONE);
-    SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 0);
-    SDL_RenderClear(g_renderer);
-    SDL_RenderPresent(g_renderer);
-
-    if (ui_result != UI_RESULT_CONNECT)
-    {
-        app_log("[APP] Launcher dismissed\n");
-        goto cleanup_sdl;
-    }
-
-    if (g_should_exit)
-        goto cleanup_sdl;
-
-    // ── SS4S init ─────────────────────────────────────────────────────────────
-    app_log("[APP] Initialising SS4S (module: %s)\n", cfg.ss4s_module);
-    SS4S_Config ss4s_cfg = {
-        .audioDriver = cfg.ss4s_module,
-        .videoDriver = cfg.ss4s_module,
-        .loggingFunction = ss4s_log_cb,
-    };
-    SS4S_Init(argc, argv, &ss4s_cfg);
-    SS4S_PostInit(argc, argv);
-
-    SS4S_Player *ss4s_player = SS4S_PlayerOpen();
-    if (!ss4s_player)
-    {
-        app_log("[APP] SS4S_PlayerOpen failed\n");
-        goto cleanup_sdl;
-    }
-    SS4S_PlayerSetWaitAudioVideoReady(ss4s_player, true);
-    SS4S_PlayerSetViewportSize(ss4s_player, cfg.video_width, cfg.video_height);
-
-    // ── Exported window (webOS 5+) ─────────────────────────────────────────
-    // On webOS 5+, NDL requires the app to pass its SDL window's native webOS
-    // window ID to the NDL backend so that UMS (User Media Service) grants
-    // foreground video-plane access.  Without this the video plane is either
-    // not shown or gets background priority (black screen).
-    //
-    // SDL_GetWindowWMInfo() returns a webOS-specific SDL_SysWMinfo struct.
-    // On the webosbrew SDL2 port, info.info.dummy (or a webOS-specific field)
-    // may contain the exported window ID.  We pass it via the SS4S env var
-    // that the NDL module reads, OR via a direct SS4S API if available.
-    {
-        SDL_SysWMinfo wm_info;
-        SDL_VERSION(&wm_info.version);
-        if (SDL_GetWindowWMInfo(g_window, &wm_info)) {
-            app_log("[APP] SDL_GetWindowWMInfo OK — subsystem=%d\n",
-                    (int)wm_info.subsystem);
-            // On the webOS SDL2 build, the exported window ID is stored in
-            // wm_info as a string pointer.  The field name varies by SDL build;
-            // we log the raw bytes so we can identify it.
-            app_log("[APP] WM info bytes (first 64): ");
-            const unsigned char *raw = (const unsigned char *)&wm_info.info;
-            for (int _i = 0; _i < 64 && _i < (int)sizeof(wm_info.info); _i++)
-                app_log("%02x ", raw[_i]);
-            app_log("\n");
-        } else {
-            app_log("[APP] SDL_GetWindowWMInfo FAILED: %s\n", SDL_GetError());
-        }
-    }
-    app_log("[APP] SS4S player opened\n");
-
-    // ── Video / Audio / Input init ────────────────────────────────────────────
-    // Determine codec once - used by both video_init (SS4S) and info.video_profile.codec (Chiaki).
-    bool force_h264    = cfg.video_codec && strcmp(cfg.video_codec, "h264") == 0;
-    bool want_h265_hdr = cfg.video_codec && strcmp(cfg.video_codec, "h265_hdr") == 0;
-
-    int requested_codec = CHIAKI_CODEC_H264;
-    if(cfg.ps5)
-    {
-        if(force_h264)
-            requested_codec = CHIAKI_CODEC_H264;
-        else if(want_h265_hdr)
-            requested_codec = CHIAKI_CODEC_H265_HDR;
-        else
-            requested_codec = CHIAKI_CODEC_H265;
-    }
-    else
-    {
-        // PS4 sessions do not support HEVC/HDR in Chiaki; force H.264.
-        requested_codec = CHIAKI_CODEC_H264;
-        if(want_h265_hdr)
-            app_log_always("[APP] video_codec=h265_hdr requested but ps5=false - forcing H.264\n");
-    }
-
-    app_log("[APP] Calling video_init...\n");
-    VideoContext *video_ctx = video_init(ss4s_player, cfg.video_width, cfg.video_height, cfg.video_fps, requested_codec);
-    if (!video_ctx)
-    {
-        app_log("[APP] video_init failed\n");
-        SS4S_PlayerClose(ss4s_player);
-        SS4S_Quit();
-        goto cleanup_sdl;
-    }
-    app_log("[APP] video_init OK\n");
-
-    AudioContext *audio_ctx = audio_init(ss4s_player);
-    if (!audio_ctx)
-    {
-        app_log("[APP] audio_init failed\n");
-        video_fini(video_ctx);
-        SS4S_PlayerClose(ss4s_player);
-        SS4S_Quit();
-        goto cleanup_sdl;
-    }
-    app_log("[APP] audio_init OK\n");
-
-    g_input_ctx = input_ctx;
-
-    // ── Build connect info (done once, reused across reconnects) ──────────────
-    ChiakiConnectInfo info;
-    memset(&info, 0, sizeof(info));
-    info.host = cfg.host;
-    info.ps5  = cfg.ps5;
-
-    size_t decoded_len;
-
-    decoded_len = sizeof(info.regist_key);
-    if (chiaki_base64_decode(cfg.registered_key_b64,
-                             strlen(cfg.registered_key_b64),
-                             info.regist_key, &decoded_len) != CHIAKI_ERR_SUCCESS)
-    {
-        app_log("[APP] Failed to decode registered_key\n");
-        goto cleanup_session_ctx;
-    }
-    decoded_len = sizeof(info.morning);
-    if (chiaki_base64_decode(cfg.rp_key_b64,
-                             strlen(cfg.rp_key_b64),
-                             info.morning, &decoded_len) != CHIAKI_ERR_SUCCESS)
-    {
-        app_log("[APP] Failed to decode rp_key\n");
-        goto cleanup_session_ctx;
-    }
-    uint8_t account_id_raw[8];
-    decoded_len = sizeof(account_id_raw);
-    if (chiaki_base64_decode(cfg.psn_account_id_b64,
-                             strlen(cfg.psn_account_id_b64),
-                             account_id_raw, &decoded_len) != CHIAKI_ERR_SUCCESS)
-    {
-        app_log("[APP] Failed to decode psn_account_id\n");
-        goto cleanup_session_ctx;
-    }
-    memcpy(&info.psn_account_id, account_id_raw, sizeof(info.psn_account_id));
-
-    info.video_profile.width   = cfg.video_width;
-    info.video_profile.height  = cfg.video_height;
-    info.video_profile.max_fps = cfg.video_fps;
-    info.video_profile.bitrate = cfg.video_bitrate;
-
-    info.video_profile.codec = requested_codec;
-
-    // Announce a DualSense to a PS5 (as chiaki-ng does).  PS5 games then send
-    // vibration as a haptics audio stream instead of classic rumble packets
-    // (which a "DualShock 4" client mostly never gets), plus trigger effects.
-    // The haptics stream is converted to motor rumble in input.c.
-    info.enable_dualsense = cfg.ps5;
-
-    // ── Session / reconnect loop ──────────────────────────────────────────────
-    // We stay inside this loop until the user deliberately exits (Home button,
-    // SIGTERM) or the PS5 requests a clean disconnect.  On network errors we
-    // wait a few seconds and retry so webOS doesn't need to relaunch the app.
-    int attempt = 0;
+    // ── Launcher ↔ stream loop ────────────────────────────────────────────────
+    // The launcher comes back after a stream when the user leaves it with
+    // Down-Down on the remote (or Back while connecting).  Back during the
+    // stream, Home, SIGTERM or a PS5-side quit still close the app.
+    bool ss4s_ready = false;
     while (!g_should_exit)
     {
-        attempt++;
-        app_log_always("[APP] Session attempt %d — connecting to %s\n", attempt, cfg.host);
+        app_log("[APP] Showing launcher UI\n");
+        SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_NONE);
+        SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);  // opaque for UI
+        SDL_RenderClear(g_renderer);
+        SDL_RenderPresent(g_renderer);
+        SDL_SetWindowSize(g_window, cfg.video_width, cfg.video_height);
+        UIResult ui_result = ui_run_registration(g_renderer, &cfg, config_path, &chiaki_log, input_ctx);
 
-        // Reset per-session flags before every attempt.
-        g_session_ended = false;
-        g_quit_reason   = CHIAKI_QUIT_REASON_NONE;
-        g_ps5_sleeping  = false;
-        g_have_video_frame = false;
+        if (ui_result != UI_RESULT_CONNECT || g_should_exit)
+        {
+            app_log("[APP] Launcher dismissed\n");
+            break;
+        }
 
-        // Reset per-session stats counters
-        stats_reset(&g_stream_stats);
-        stats_set_video_format(&g_stream_stats, cfg.video_width, cfg.video_height, cfg.video_fps,
-                             info.video_profile.codec);
-
-        // Show a minimal loading screen immediately.
-        ui_render_loading(g_renderer, "Connecting");
+        // Spinner straight away: SS4S/NDL setup below takes a moment.
+        g_return_to_menu = false;
+        g_loading_text   = "Connecting";
+        ui_render_loading(g_renderer, g_loading_text);
         SDL_RenderPresent(g_renderer);
 
-        // ── Wakeup ───────────────────────────────────────────────────────────
-        // Send wakeup on the first attempt only.  Poll until the PS5 becomes
-        // reachable (TCP connect to port 9295) rather than using a fixed delay
-        // so we connect the moment it is ready whether it was asleep or awake.
-        // Resend the wakeup packet every 5s in case the first UDP was lost.
-        if (cfg.wakeup && attempt == 1)
+        Uint32 setup_t0 = SDL_GetTicks();
+
+        // ── SS4S init (once per app run) ──────────────────────────────────────
+        if (!ss4s_ready)
         {
-            if (cfg.psn_refresh_token && cfg.psn_refresh_token[0])
-                do_psn_wakeup(&cfg, &chiaki_log);
+            app_log("[APP] Initialising SS4S (module: %s)\n", cfg.ss4s_module);
+            SS4S_Config ss4s_cfg = {
+                .audioDriver = cfg.ss4s_module,
+                .videoDriver = cfg.ss4s_module,
+                .loggingFunction = ss4s_log_cb,
+            };
+            SS4S_Init(argc, argv, &ss4s_cfg);
+            SS4S_PostInit(argc, argv);
+            ss4s_ready = true;
+        }
+
+        SS4S_Player *ss4s_player = SS4S_PlayerOpen();
+        if (!ss4s_player)
+        {
+            app_log_always("[APP] SS4S_PlayerOpen failed\n");
+            break;
+        }
+        SS4S_PlayerSetWaitAudioVideoReady(ss4s_player, true);
+        SS4S_PlayerSetViewportSize(ss4s_player, cfg.video_width, cfg.video_height);
+
+        {
+            SDL_SysWMinfo wm_info;
+            SDL_VERSION(&wm_info.version);
+            if (SDL_GetWindowWMInfo(g_window, &wm_info))
+                app_log("[APP] SDL_GetWindowWMInfo OK — subsystem=%d\n", (int)wm_info.subsystem);
             else
-                do_wakeup(&cfg, &chiaki_log);
+                app_log("[APP] SDL_GetWindowWMInfo FAILED: %s\n", SDL_GetError());
+        }
+        app_log("[APP] SS4S player opened\n");
 
-            Uint32 deadline      = SDL_GetTicks() + (Uint32)cfg.wakeup_delay_ms;
-            Uint32 next_wakeup   = SDL_GetTicks() + 5000;
-            app_log_always("[WAKEUP] Waiting up to %dms for PS5 to become ready...\n",
-                    cfg.wakeup_delay_ms);
-            bool ps5_ready = false;
+        // ── Video / Audio ─────────────────────────────────────────────────────
+        bool force_h264    = cfg.video_codec && strcmp(cfg.video_codec, "h264") == 0;
+        bool want_h265_hdr = cfg.video_codec && strcmp(cfg.video_codec, "h265_hdr") == 0;
+
+        int requested_codec = CHIAKI_CODEC_H264;
+        if (cfg.ps5)
+        {
+            if (force_h264)
+                requested_codec = CHIAKI_CODEC_H264;
+            else if (want_h265_hdr)
+                requested_codec = CHIAKI_CODEC_H265_HDR;
+            else
+                requested_codec = CHIAKI_CODEC_H265;
+        }
+        else
+        {
+            // PS4 sessions do not support HEVC/HDR in Chiaki; force H.264.
+            requested_codec = CHIAKI_CODEC_H264;
+            if (want_h265_hdr)
+                app_log_always("[APP] video_codec=h265_hdr requested but ps5=false - forcing H.264\n");
+        }
+
+        app_log("[APP] Calling video_init...\n");
+        VideoContext *video_ctx = video_init(ss4s_player, cfg.video_width, cfg.video_height, cfg.video_fps, requested_codec);
+        if (!video_ctx)
+        {
+            app_log_always("[APP] video_init failed\n");
+            SS4S_PlayerClose(ss4s_player);
+            break;
+        }
+
+        AudioContext *audio_ctx = audio_init(ss4s_player);
+        if (!audio_ctx)
+        {
+            app_log_always("[APP] audio_init failed\n");
+            video_fini(video_ctx);
+            SS4S_PlayerClose(ss4s_player);
+            break;
+        }
+
+        g_input_ctx = input_ctx;
+        app_log_always("[APP] Player setup took %u ms\n", (unsigned)(SDL_GetTicks() - setup_t0));
+
+        // ── Connect info (rebuilt per stream: settings may have changed) ──────
+        ChiakiConnectInfo info;
+        memset(&info, 0, sizeof(info));
+        info.host = cfg.host;
+        info.ps5  = cfg.ps5;
+
+        size_t decoded_len;
+        bool keys_ok = true;
+        decoded_len = sizeof(info.regist_key);
+        if (chiaki_base64_decode(cfg.registered_key_b64, strlen(cfg.registered_key_b64),
+                                 info.regist_key, &decoded_len) != CHIAKI_ERR_SUCCESS)
+        {
+            app_log_always("[APP] Failed to decode registered_key\n");
+            keys_ok = false;
+        }
+        decoded_len = sizeof(info.morning);
+        if (keys_ok && chiaki_base64_decode(cfg.rp_key_b64, strlen(cfg.rp_key_b64),
+                                            info.morning, &decoded_len) != CHIAKI_ERR_SUCCESS)
+        {
+            app_log_always("[APP] Failed to decode rp_key\n");
+            keys_ok = false;
+        }
+        uint8_t account_id_raw[8];
+        decoded_len = sizeof(account_id_raw);
+        if (keys_ok && chiaki_base64_decode(cfg.psn_account_id_b64, strlen(cfg.psn_account_id_b64),
+                                            account_id_raw, &decoded_len) != CHIAKI_ERR_SUCCESS)
+        {
+            app_log_always("[APP] Failed to decode psn_account_id\n");
+            keys_ok = false;
+        }
+        memcpy(&info.psn_account_id, account_id_raw, sizeof(info.psn_account_id));
+
+        info.video_profile.width   = cfg.video_width;
+        info.video_profile.height  = cfg.video_height;
+        info.video_profile.max_fps = cfg.video_fps;
+        info.video_profile.bitrate = cfg.video_bitrate;
+        info.video_profile.codec   = requested_codec;
+
+        // Announce a DualSense to a PS5 (as chiaki-ng does).  PS5 games then send
+        // vibration as a haptics audio stream instead of classic rumble packets
+        // (which a "DualShock 4" client mostly never gets), plus trigger effects.
+        // The haptics stream is converted to motor rumble in input.c.
+        info.enable_dualsense = cfg.ps5;
+
+        // ── Session / reconnect loop ──────────────────────────────────────────
+        // Stay here until the user leaves (Back, Home, Down-Down, SIGTERM) or
+        // the PS5 ends the session; transient network errors are retried.
+        int attempt = 0;
+        while (keys_ok && !g_should_exit && !g_return_to_menu)
+        {
+            attempt++;
+            app_log_always("[APP] Session attempt %d — connecting to %s\n", attempt, cfg.host);
+
+            // Reset per-session flags before every attempt.
+            g_session_ended = false;
+            g_quit_reason   = CHIAKI_QUIT_REASON_NONE;
+            g_ps5_sleeping  = false;
+            g_have_video_frame = false;
+
+            stats_reset(&g_stream_stats);
+            stats_set_video_format(&g_stream_stats, cfg.video_width, cfg.video_height, cfg.video_fps,
+                                   info.video_profile.codec);
+
+            g_loading_text = "Connecting";
+            loading_frame();
+
+            // ── Wakeup ───────────────────────────────────────────────────────
+            // First attempt only.  Runs on a worker thread so the spinner keeps
+            // turning through the PSN HTTP calls and the readiness probe.
+            if (cfg.wakeup && attempt == 1)
+            {
+                WakeupJob wj = { &cfg, &chiaki_log };
+                run_with_loading(wakeup_job, &wj);
+                if (g_should_exit || g_return_to_menu)
+                    break;
+                g_loading_text = "Connecting";
+            }
+
+            ChiakiErrorCode err = chiaki_session_init(&g_session, &info, &chiaki_log);
+            if (err != CHIAKI_ERR_SUCCESS)
+            {
+                app_log_always("[APP] chiaki_session_init failed: %s\n", chiaki_error_string(err));
+                loading_wait(5000);   // transient failure — wait and retry
+                continue;
+            }
+
+            chiaki_session_set_event_cb(&g_session, session_event_cb, NULL);
+            chiaki_session_set_video_sample_cb(&g_session, video_sample_cb, video_ctx);
+
+            ChiakiAudioSink audio_sink = audio_make_sink(audio_ctx);
+            chiaki_session_set_audio_sink(&g_session, &audio_sink);
+
+            if (info.enable_dualsense) {
+                ChiakiAudioSink haptics_sink = { 0 };
+                haptics_sink.user     = input_ctx;
+                haptics_sink.frame_cb = haptics_frame_cb;
+                chiaki_session_set_haptics_sink(&g_session, &haptics_sink);
+            }
+
+            err = chiaki_session_start(&g_session);
+            if (err != CHIAKI_ERR_SUCCESS)
+            {
+                app_log_always("[APP] chiaki_session_start failed: %s\n", chiaki_error_string(err));
+                chiaki_session_fini(&g_session);
+                loading_wait(5000);
+                continue;
+            }
+
+            // Wire the evdev reader thread to this session so it can push
+            // controller state updates.
+            input_set_session(input_ctx, &g_session);
+            app_log_always("[APP] Session started — entering event loop\n");
+
+            // ── Per-session event loop ────────────────────────────────────────
             SDL_Event ev;
+            uint32_t stream_start_ms = 0;   // first video frame → startup hint
+            uint32_t last_down_ms = 0;      // Down-Down → back to the menu
+            g_loading_text = "Starting stream";
 
-            struct sockaddr_in sa;
-            memset(&sa, 0, sizeof(sa));
-            sa.sin_family = AF_INET;
-            sa.sin_port   = htons(9295);
-            inet_pton(AF_INET, cfg.host, &sa.sin_addr);
-
-            while (!g_should_exit && SDL_GetTicks() < deadline)
+            while (!g_session_ended && !g_should_exit)
             {
                 while (SDL_PollEvent(&ev))
-                    if (ev.type == SDL_QUIT) { g_should_exit = true; break; }
-                if (g_should_exit) break;
-
-                ui_render_loading(g_renderer, "Waking console");
-                SDL_RenderPresent(g_renderer);
-
-                if (SDL_GetTicks() >= next_wakeup)
                 {
-                    do_wakeup(&cfg, &chiaki_log);
-                    next_wakeup = SDL_GetTicks() + 5000;
-                }
-
-                int probe = socket(AF_INET, SOCK_STREAM, 0);
-                if (probe < 0)
-                {
-                    app_log("[WAKEUP] probe: socket() failed: %s\n", strerror(errno));
-                    SDL_Delay(500);
-                    continue;
-                }
-                int flags = fcntl(probe, F_GETFL, 0);
-                fcntl(probe, F_SETFL, flags | O_NONBLOCK);
-
-                int rc = connect(probe, (struct sockaddr *)&sa, sizeof(sa));
-                if (rc == 0)
-                {
-                    close(probe);
-                    app_log_always("[WAKEUP] PS5 is ready (port 9295 open)\n");
-                    ps5_ready = true;
-                    break;
-                }
-                else if (errno == EINPROGRESS)
-                {
-                    fd_set wfds;
-                    FD_ZERO(&wfds);
-                    FD_SET(probe, &wfds);
-                    struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
-                    int sel = select(probe + 1, NULL, &wfds, NULL, &tv);
-                    if (sel > 0)
+                    if (ev.type == SDL_QUIT)
                     {
-                        int err2 = 0;
-                        socklen_t len = sizeof(err2);
-                        getsockopt(probe, SOL_SOCKET, SO_ERROR, &err2, &len);
-                        if (err2 == 0)
-                        {
-                            close(probe);
-                            app_log_always("[WAKEUP] PS5 is ready (port 9295 open)\n");
-                            ps5_ready = true;
-                            break;
+                        // SDL_QUIT arrives when the user presses Home on webOS.
+                        app_log("[APP] SDL_QUIT received (Home button?) — exiting\n");
+                        g_should_exit   = true;
+                        g_session_ended = true;
+                        break;
+                    }
+                    // TV remote Back (not forwarded to the PS5): while the
+                    // stream is still starting it cancels back to the menu;
+                    // once video runs it exits the app.  Gamepads are read in
+                    // input.c's evdev thread (EVIOCGRAB), never here.
+                    if (ev.type == SDL_KEYDOWN && is_remote_back(ev.key.keysym.sym))
+                    {
+                        if (!g_have_video_frame) {
+                            app_log_always("[APP] Back while starting — returning to the menu\n");
+                            g_return_to_menu = true;
+                        } else {
+                            app_log("[APP] Remote Back/Escape — exiting\n");
+                            g_should_exit = true;
                         }
-                        app_log("[WAKEUP] probe: %s (errno=%d)\n",
-                                err2 == ECONNREFUSED ? "ECONNREFUSED — PS5 NIC up, port 9295 closed"
-                                                     : strerror(err2), err2);
+                        g_session_ended = true;
+                        break;
                     }
-                    else if (sel == 0)
+                    if (ev.type == SDL_KEYDOWN || ev.type == SDL_KEYUP)
                     {
-                        app_log("[WAKEUP] probe: select timeout — PS5 not yet reachable\n");
+                        SDL_Keycode k = ev.key.keysym.sym;
+                        bool is_up   = (k == SDLK_UP   || (int)k == 1073741906);   // WEBOS_KEY_UP
+                        bool is_down = (k == SDLK_DOWN || (int)k == 1073741905);   // WEBOS_KEY_DOWN
+
+                        // Down twice within 700 ms → leave the stream, back to the launcher.
+                        if (is_down && ev.type == SDL_KEYDOWN && !ev.key.repeat)
+                        {
+                            uint32_t now = SDL_GetTicks();
+                            if (last_down_ms && now - last_down_ms <= 700)
+                            {
+                                app_log_always("[APP] Remote Down-Down — back to the menu\n");
+                                g_return_to_menu = true;
+                                g_session_ended  = true;
+                                break;
+                            }
+                            last_down_ms = now;
+                        }
+
+                        // Remote navigation never reaches the PS5; only the
+                        // gamepad controls the console.  Up toggles the stats
+                        // overlay once the video is running.
+                        bool is_remote_nav = is_up || is_down
+                            || k == SDLK_LEFT   || (int)k == 1073741904   // WEBOS_KEY_LEFT
+                            || k == SDLK_RIGHT  || (int)k == 1073741903   // WEBOS_KEY_RIGHT
+                            || k == SDLK_RETURN || (int)k == 1073741912   // WEBOS_KEY_ENTER / OK
+                            || (int)k == 1073742093                        // WEBOS_KEY_RED
+                            || (int)k == 1073742089                        // WEBOS_KEY_GREEN
+                            || (int)k == 1073742090                        // WEBOS_KEY_YELLOW
+                            || (int)k == 1073742091;                       // WEBOS_KEY_BLUE
+                        if (is_remote_nav)
+                        {
+                            if (g_have_video_frame && is_up && ev.type == SDL_KEYDOWN && !ev.key.repeat)
+                            {
+                                stats_overlay_toggle(&stats_overlay);
+                                app_log_always("[UI] Stats overlay %s (UP to toggle)\n",
+                                               stats_overlay.enabled ? "ON" : "OFF");
+                            }
+                            continue;
+                        }
                     }
-                    else
-                    {
-                        app_log("[WAKEUP] probe: select error: %s\n", strerror(errno));
-                    }
+                    input_handle_event(&ev, input_ctx, &g_session);
+                }
+                if (g_session_ended || g_should_exit)
+                    break;
+
+                // Until the first video sample: opaque loading screen.  Then
+                // transparent frames so the NDL plane underneath shows through.
+                if (!g_have_video_frame)
+                {
+                    ui_render_loading(g_renderer, g_loading_text);
+                    SDL_RenderPresent(g_renderer);
+                    SDL_Delay(16);
                 }
                 else
                 {
-                    app_log("[WAKEUP] probe: connect immediate error: %s (errno=%d)\n",
-                            strerror(errno), errno);
+                    if (stream_start_ms == 0)
+                        stream_start_ms = SDL_GetTicks();
+
+                    // A transparent frame each tick keeps the compositor seeing
+                    // activity (no inactivity kill) and shows the NDL plane.
+                    SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_NONE);
+                    SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 0);
+                    SDL_RenderClear(g_renderer);
+
+                    if (stats_overlay.enabled)
+                    {
+                        int lat_us = 0;
+                        if (SS4S_PlayerGetVideoLatency(ss4s_player, 1000000, &lat_us))
+                            atomic_store_explicit(&g_stream_stats.video_latency_ms,
+                                                  (lat_us + 500) / 1000, memory_order_relaxed);
+                        else
+                            atomic_store_explicit(&g_stream_stats.video_latency_ms, -1, memory_order_relaxed);
+                    }
+                    stats_overlay_update(&stats_overlay, &g_stream_stats, SDL_GetTicks());
+                    if (stats_overlay.enabled)
+                        ui_render_stats_overlay(g_renderer, stats_overlay.text);
+
+                    // Startup hint for 6 s (1 s fade-out) unless stats are shown.
+                    if (!stats_overlay.enabled && stream_start_ms != 0)
+                    {
+                        const uint32_t hint_duration_ms = 6000;
+                        const uint32_t fade_ms = 1000;
+                        uint32_t elapsed = (uint32_t)(SDL_GetTicks() - stream_start_ms);
+                        if (elapsed < hint_duration_ms)
+                        {
+                            float opacity = 1.0f;
+                            if (elapsed > hint_duration_ms - fade_ms)
+                                opacity = (float)(hint_duration_ms - elapsed) / (float)fade_ms;
+                            ui_render_hint(g_renderer, "Remote: Up = stream stats,  Down twice = back to menu",
+                                           opacity);
+                        }
+                    }
+
+                    SDL_RenderPresent(g_renderer);
+                    SDL_Delay(4);   // ~250Hz loop; keeps compositor alive without adding input latency
                 }
-                close(probe);
+            }
+
+            // ── Session teardown ──────────────────────────────────────────────
+            // Rest mode only when the app itself is closing (not when going
+            // back to the menu), and not if the PS5 already went to sleep.
+            if (cfg.sleep_on_exit && g_should_exit && !g_ps5_sleeping)
+            {
+                app_log("[APP] Sending PS5 to rest mode\n");
+                chiaki_session_goto_bed(&g_session);
                 SDL_Delay(500);
             }
-            if (!ps5_ready && !g_should_exit)
-                app_log_always("[WAKEUP] Deadline reached — attempting connection anyway\n");
-        }
 
-        ChiakiErrorCode err = chiaki_session_init(&g_session, &info, &chiaki_log);
-        if (err != CHIAKI_ERR_SUCCESS)
-        {
-            app_log("[APP] chiaki_session_init failed: %s\n", chiaki_error_string(err));
-            // Transient failure — wait and retry
-            SDL_Delay(5000);
-            continue;
-        }
-
-        chiaki_session_set_event_cb(&g_session, session_event_cb, NULL);
-        chiaki_session_set_video_sample_cb(&g_session,
-            video_sample_cb, video_ctx);
-        app_log("[APP] Video callback registered\n");
-
-        ChiakiAudioSink audio_sink = audio_make_sink(audio_ctx);
-        chiaki_session_set_audio_sink(&g_session, &audio_sink);
-        app_log("[APP] Audio sink registered: header_cb=%p frame_cb=%p user=%p\n",
-                (void *)audio_sink.header_cb,
-                (void *)audio_sink.frame_cb,
-                audio_sink.user);
-
-        if (info.enable_dualsense) {
-            ChiakiAudioSink haptics_sink = { 0 };
-            haptics_sink.user     = input_ctx;
-            haptics_sink.frame_cb = haptics_frame_cb;
-            chiaki_session_set_haptics_sink(&g_session, &haptics_sink);
-        }
-
-        err = chiaki_session_start(&g_session);
-        if (err != CHIAKI_ERR_SUCCESS)
-        {
-            app_log("[APP] chiaki_session_start failed: %s\n", chiaki_error_string(err));
-            chiaki_session_fini(&g_session);
-            SDL_Delay(5000);
-            continue;
-        }
-
-        // Wire the evdev reader thread to this session so it can push
-        // controller state updates. The reader thread was started in
-        // input_init() and waits for a non-NULL session pointer.
-        input_set_session(input_ctx, &g_session);
-        app_log_always("[APP] Session started — entering event loop\n");
-
-        // ── Per-session event loop ────────────────────────────────────────────
-        SDL_Event ev;
-
-        // Track when the first video frame arrives so we can show a
-        // brief startup hint ("Press UP for stats overlay").
-        uint32_t stream_start_ms = 0;
-
-        while (!g_session_ended && !g_should_exit)
-        {
-            while (SDL_PollEvent(&ev))
+            // Detach session from evdev reader before tearing down the session.
+            input_set_session(input_ctx, NULL);
+            app_log_always("[APP] Stopping session (reason=%d)\n", (int)g_quit_reason);
+            if (!g_should_exit)
             {
-                if (ev.type == SDL_QUIT)
-                {
-                    // SDL_QUIT arrives when the user presses Home on webOS.
-                    // Treat it as a deliberate exit — no reconnect.
-                    app_log("[APP] SDL_QUIT received (Home button?) — exiting\n");
-                    g_should_exit   = true;
-                    g_session_ended = true;
-                    break;
-                }
-                // TV remote Back button → exit the app (not forwarded to PS5).
-                // All gamepad buttons are handled in input.c's evdev reader thread
-                // via EVIOCGRAB — the system never sees them.
-                if (ev.type == SDL_KEYDOWN &&
-                    (ev.key.keysym.sym == (SDL_Keycode)1073742094 ||  // WEBOS_KEY_BACK
-                     ev.key.keysym.sym == SDLK_ESCAPE))
-                {
-                    app_log("[APP] Remote Back/Escape — exiting\n");
-                    g_should_exit   = true;
-                    g_session_ended = true;
-                    break;
-                }
-                // ── Block TV remote navigation keys during streaming ─────────
-                // During an active stream, the TV remote should not send any
-                // input to the PS5 — only the gamepad (via evdev in input.c)
-                // controls the console.  Remote keys we handle here:
-                //   UP (short press) → toggle stats overlay
-                //   All other nav keys → swallowed silently
-                // Volume, Power, Mute are handled by webOS at the system level
-                // and never arrive as SDL events.  Back and Home are handled
-                // above before this block.
-                if (g_have_video_frame && (ev.type == SDL_KEYDOWN || ev.type == SDL_KEYUP))
-                {
-                    SDL_Keycode k = ev.key.keysym.sym;
-                    bool is_up = (k == SDLK_UP || (int)k == 1073741906);    // WEBOS_KEY_UP
-
-                    // Block ALL remote directional / navigation keys from
-                    // reaching the PS5.  Gamepad D-pad is handled exclusively
-                    // through the evdev reader thread in input.c.
-                    bool is_remote_nav = is_up
-                        || k == SDLK_DOWN   || (int)k == 1073741905   // WEBOS_KEY_DOWN
-                        || k == SDLK_LEFT   || (int)k == 1073741904   // WEBOS_KEY_LEFT
-                        || k == SDLK_RIGHT  || (int)k == 1073741903   // WEBOS_KEY_RIGHT
-                        || k == SDLK_RETURN || (int)k == 1073741912   // WEBOS_KEY_ENTER / OK
-                        || (int)k == 1073742093                        // WEBOS_KEY_RED
-                        || (int)k == 1073742089                        // WEBOS_KEY_GREEN
-                        || (int)k == 1073742090                        // WEBOS_KEY_YELLOW
-                        || (int)k == 1073742091;                       // WEBOS_KEY_BLUE
-
-                    if (is_remote_nav)
-                    {
-                        // Toggle stats overlay on short press of UP (KEYDOWN, no repeat)
-                        if (is_up && ev.type == SDL_KEYDOWN && !ev.key.repeat)
-                        {
-                            stats_overlay_toggle(&stats_overlay);
-                            app_log_always("[UI] Stats overlay %s (UP to toggle)\n",
-                                           stats_overlay.enabled ? "ON" : "OFF");
-                        }
-                        // Swallow all remote nav keys — don't forward to PS5
-                        continue;
-                    }
-                }
-                input_handle_event(&ev, input_ctx, &g_session);
+                g_loading_text = g_return_to_menu ? "Closing stream" : "Reconnecting";
+                loading_frame();
             }
+            chiaki_session_stop(&g_session);
+            chiaki_session_join(&g_session);
+            chiaki_session_fini(&g_session);
 
-            // While we're waiting for the first video sample, show an opaque
-            // loading screen. Once video starts, switch back to transparent
-            // frames so the NDL plane underneath shows through.
-            if (!g_have_video_frame)
+            // ── Reconnect decision ────────────────────────────────────────────
+            if (!g_should_exit && !g_return_to_menu && should_reconnect(g_quit_reason))
             {
-                ui_render_loading(g_renderer, "Starting stream");
-                SDL_RenderPresent(g_renderer);
-                SDL_Delay(16);
+                // "Remote Play already in use" right after leaving a stream:
+                // the console just needs a moment to drop the old session.
+                Uint32 retry_ms = g_quit_reason == CHIAKI_QUIT_REASON_SESSION_REQUEST_RP_IN_USE ? 1500 : 4000;
+                app_log_always("[APP] Session ended (reason=%d) — retrying in %u ms...\n",
+                               (int)g_quit_reason, (unsigned)retry_ms);
+                g_loading_text = "Connecting";
+                loading_wait(retry_ms);
             }
             else
             {
-                // Capture the moment the first video frame appeared.
-                if (stream_start_ms == 0)
-                    stream_start_ms = SDL_GetTicks();
-
-                // Present a transparent frame each tick.
-                // This does two things: (1) keeps the webOS compositor seeing
-                // active frame production so it won't terminate the app for
-                // inactivity, and (2) ensures the NDL video plane underneath
-                // is composited and visible on screen.
-                SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_NONE);
-                SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 0);
-                SDL_RenderClear(g_renderer);
-
-                // Update + draw stats overlay (if enabled)
-                if (stats_overlay.enabled)
-                {
-                    int lat_us = 0;
-                    if (SS4S_PlayerGetVideoLatency(ss4s_player, 1000000, &lat_us))
-                        atomic_store_explicit(&g_stream_stats.video_latency_ms,
-                                             (lat_us + 500) / 1000,
-                                             memory_order_relaxed);
-                    else
-                        atomic_store_explicit(&g_stream_stats.video_latency_ms, -1, memory_order_relaxed);
-                }
-                stats_overlay_update(&stats_overlay, &g_stream_stats, SDL_GetTicks());
-                if (stats_overlay.enabled)
-                    ui_render_stats_overlay(g_renderer, stats_overlay.text);
-
-                // Show a brief startup hint for 6 seconds (with 1s fade-out)
-                // so users know they can press UP for the stats overlay.
-                // Skip the hint if the stats overlay is already visible.
-                if (!stats_overlay.enabled && stream_start_ms != 0)
-                {
-                    const uint32_t hint_duration_ms = 6000;
-                    const uint32_t fade_ms = 1000;
-                    uint32_t elapsed = (uint32_t)(SDL_GetTicks() - stream_start_ms);
-                    if (elapsed < hint_duration_ms)
-                    {
-                        float opacity = 1.0f;
-                        if (elapsed > hint_duration_ms - fade_ms)
-                            opacity = (float)(hint_duration_ms - elapsed) / (float)fade_ms;
-                        ui_render_hint(g_renderer, "Press UP on remote for stream stats", opacity);
-                    }
-                }
-
-                SDL_RenderPresent(g_renderer);
-                SDL_Delay(4);   // ~250Hz loop; keeps compositor alive without adding input latency
+                break;   // deliberate exit, PS5 quit, or back to the menu
             }
         }
 
-        // ── Session teardown ──────────────────────────────────────────────────
-        // Only send the sleep command if WE are the one exiting (Home button etc).
-        // If the PS5 itself went to Rest Mode, it already sent the goodbye — skip it.
-        if (cfg.sleep_on_exit && g_should_exit
-            && !g_ps5_sleeping)
-        {
-            app_log("[APP] Sending PS5 to rest mode\n");
-            chiaki_session_goto_bed(&g_session);
-            SDL_Delay(500);
-        }
+        g_input_ctx = NULL;
+        audio_fini(audio_ctx);
+        video_fini(video_ctx);
+        SS4S_PlayerClose(ss4s_player);
 
-        // Detach session from evdev reader before tearing down the session.
-        input_set_session(input_ctx, NULL);
-        app_log_always("[APP] Stopping session (reason=%d)\n", (int)g_quit_reason);
-        chiaki_session_stop(&g_session);
-        chiaki_session_join(&g_session);
-        chiaki_session_fini(&g_session);
-
-        // ── Reconnect decision ────────────────────────────────────────────────
-        if (!g_should_exit && should_reconnect(g_quit_reason))
-        {
-            app_log_always("[APP] Session ended due to network error — retrying in 4s...\n");
-            SDL_Delay(4000);
-            // Continue the outer while loop → new attempt
-        }
-        else
-        {
-            // Deliberate exit (SIGTERM, Home, PS5 kick) — leave the loop.
+        if (!g_return_to_menu)
             break;
-        }
+        app_log_always("[APP] Back to the menu\n");
     }
 
-cleanup_session_ctx:
-    g_input_ctx = NULL;
-    audio_fini(audio_ctx);
-    video_fini(video_ctx);
-    SS4S_PlayerClose(ss4s_player);
-    SS4S_Quit();
+    if (ss4s_ready)
+        SS4S_Quit();
 
-cleanup_sdl:
     input_fini(input_ctx);
     SDL_DestroyRenderer(g_renderer);
     SDL_DestroyWindow(g_window);

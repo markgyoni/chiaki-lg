@@ -14,6 +14,7 @@
 #include "ui_text.h"
 #include "input.h"
 #include "ui_padtest.h"
+#include "app_log.h"
 
 /* ── Gamepad → menu navigation ───────────────────────────────────────────────
  * Gamepads are read by input.c (grabbed, so webOS never sees them).  Turn
@@ -429,8 +430,8 @@ static void render_setup_screen(SDL_Renderer *r, const char *status,
         ui_text_draw(r, rx, ry, "Ready to play", 42, UI_FONT_BOLD, tx, UI_ALIGN_LEFT);
         ry += 66;
         ry += ui_text_draw_wrapped(r, rx, ry, rw,
-            "Press Connect. During the stream, hold Up on the remote to show stream statistics, "
-            "and press Back to leave.", 30, UI_FONT_REGULAR, dim, 0) + 24;
+            "Press Connect. During the stream, press Up on the remote for stream statistics, "
+            "Down twice to return here, and Back to close the app.", 30, UI_FONT_REGULAR, dim, 0) + 24;
     }
 
     /* controllers (live) */
@@ -782,8 +783,11 @@ void ui_render_loading(SDL_Renderer *r, const char *base_text)
     char msg[256];
     snprintf(msg, sizeof(msg), "%s%.*s", base_text, dot_count, "...");
 
+    /* Centre on the text with all three dots so it doesn't shift as they animate. */
     int msg_scale = 4;
-    int mw = text_width(msg, msg_scale);
+    char full[256];
+    snprintf(full, sizeof(full), "%s...", base_text);
+    int mw = text_width(full, msg_scale);
     set_color(r, COL_TEXT);
     draw_text(r, cx - mw / 2, cy + 70, msg, msg_scale);
 
@@ -1147,7 +1151,13 @@ UIResult ui_run_registration(SDL_Renderer *renderer, AppConfig *cfg,
     if (ui_valid_ipv4(ip) && ui_has_keys(cfg))
         focus = 14;
 
-    SDL_StartTextInput();
+    /* Once per process: on webOS a second SDL_StartTextInput (launcher shown
+     * again after a stream) crashes in wl_proxy_marshal. */
+    static bool text_input_started;
+    if (!text_input_started) {
+        SDL_StartTextInput();
+        text_input_started = true;
+    }
 
     while (1) {
         pad_nav_poll(input);

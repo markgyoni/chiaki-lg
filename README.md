@@ -162,9 +162,9 @@ The TV remote is not forwarded to the PS5 as controller input. During streaming 
 
 | TV Remote Button | Action |
 |---|---|
-| **Up** (hold 0.5 s) | Toggle stats overlay |
-| **Up** (short press) | Forwarded to PS5 as D-pad up |
-| **Back** | Exit the app |
+| **Up** | Toggle stats overlay |
+| **Down** twice (within 0.7 s) | Leave the stream and go back to the menu |
+| **Back** | Exit the app (while the stream is still connecting: cancel and go back to the menu) |
 | **Home** | Exit the app |
 
 ---
