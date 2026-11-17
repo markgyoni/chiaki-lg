@@ -99,14 +99,14 @@ every face button, L1/R1, analog L2/R2 (full 0–255 travel), L3/R3, Create/Shar
 
 **Why:** after Stage 1 the mappings are correct, but buttons can still get stuck, a controller that reconnects is never picked up again, and updates are sent too often.
 
-- [ ] **Per-frame updates**: collect changes and call `chiaki_session_set_controller_state` only on `EV_SYN/SYN_REPORT`, not on every event. Handle `SYN_DROPPED` by re-reading the full state (`EVIOCGKEY` + `EVIOCGABS`).
-- [ ] **Read in bulk**: `read()` an array of `input_event` per `select` wake-up instead of a single event.
-- [ ] **Per-pad state**: keep a `ChiakiControllerState` per pad and combine them with `chiaki_controller_state_or()` before sending. Clear a pad's state when it disconnects. Today a disconnect mid-press leaves the button held on the PS5.
-- [ ] **Hotplug**: watch `/dev/input` with `inotify` (`IN_CREATE`/`IN_ATTRIB`; the node permissions can appear late) or rescan every 2 s. Open, classify, grab and add new pads at runtime. Reuse slots freed by disconnects.
-- [ ] Release the `EVIOCGRAB` grab and reset state on session end, so controllers don't stay locked between reconnect attempts.
-- [ ] Decide on a multi-controller policy: merge all pads into one player (current behaviour) or use only the first pad. Make it configurable later. chiaki supports only one controller per session.
+- [x] **Per-frame updates**: collect changes and call `chiaki_session_set_controller_state` only on `EV_SYN/SYN_REPORT`, not on every event. Handle `SYN_DROPPED` by re-reading the full state (`EVIOCGKEY` + `EVIOCGABS`).
+- [x] **Read in bulk**: `read()` an array of `input_event` per `select` wake-up instead of a single event.
+- [x] **Per-pad state**: keep a `ChiakiControllerState` per pad and combine them with `chiaki_controller_state_or()` before sending. Clear a pad's state when it disconnects. Today a disconnect mid-press leaves the button held on the PS5.
+- [x] **Hotplug**: watch `/dev/input` with `inotify` (`IN_CREATE`/`IN_ATTRIB`, rescan 500 ms after a change; periodic 3 s rescan if inotify is unavailable). Open, classify, grab and add new pads at runtime. Reuse slots freed by disconnects.
+- [x] ~~Release the grab between reconnect attempts~~ **Decided: keep the grab for the whole app lifetime.** Releasing it would hand the pad back to webOS during reconnect waits (B → Back would quit the app). The state is re-sent in full when a new session starts (`input_set_session`).
+- [x] Multi-controller policy: **merge** all pads into one player (unchanged behaviour); each pad keeps its own state, so releasing a button on one pad no longer cancels the other. Configurable selection is left for Stage 10.
 
-**Done when:** you can power a controller off and on mid-stream and it resumes, no button stays stuck after a disconnect, and two pads don't fight each other.
+**Done when:** you can power a controller off and on mid-stream and it resumes, no button stays stuck after a disconnect, and two pads don't fight each other.  **Status (2026-11-16):** passed on the TV — DualSense and Xbox reconnect mid-stream, no stuck input on disconnect, two pads together.
 
 ---
 

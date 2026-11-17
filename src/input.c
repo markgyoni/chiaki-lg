@@ -13,6 +13,7 @@
 #include <pthread.h>
 #include <errno.h>
 
+#include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
 #include <time.h>
@@ -22,25 +23,7 @@
 // These gamepad layout aliases were added in Linux 3.16.
 // The webOS toolchain sysroot ships with older headers that only have BTN_A/B/X/Y.
 #ifndef BTN_SOUTH
-#define BTN_SOUTH    0x130   /* BTN_A  — Cross / A  */
-#endif
-#ifndef BTN_EAST
-#define BTN_EAST     0x131   /* BTN_B  — Circle / B */
-#endif
-#ifndef BTN_NORTH
-#define BTN_NORTH    0x133   /* BTN_X  — Square / X     (confusingly, kernel maps Xbox-X to NORTH) */
-#endif
-#ifndef BTN_WEST
-#define BTN_WEST     0x134   /* BTN_Y  — Triangle / Y   (confusingly, kernel maps Xbox-Y to WEST)  */
-#endif
-#ifndef BTN_DPAD_UP
-#define BTN_DPAD_UP    0x220
-#define BTN_DPAD_DOWN  0x221
-#define BTN_DPAD_LEFT  0x222
-#define BTN_DPAD_RIGHT 0x223
-#endif
-#ifndef BTN_RECORD
-#define BTN_RECORD     0x167   /* Xbox Series X|S capture/share button */
+#define BTN_SOUTH    0x130
 #endif
 
 #include <chiaki/controller.h>
@@ -61,14 +44,17 @@
 #define EVDEV_BITS_TEST(arr, bit) \
     (((arr)[(bit) / 8]) & (1 << ((bit) % 8)))
 
-// ── Per-device state ───────────────────────────────────────────────────────────
 #define MAX_GAMEPADS 4
 
-// ── Touchpad chord: Select+Start → Touchpad (for Xbox controllers) ──────────
+// Hotplug: /dev/input is watched with inotify; after a change we wait a bit
+// before rescanning because udev fixes up node permissions after creation.
+#define RESCAN_DELAY_MS     500
+#define RESCAN_FALLBACK_MS  3000   // periodic rescan if inotify is unavailable
+
+// ── Touchpad chord: Select+Start → Touchpad (pads without a touchpad) ────────
 // When Select or Start is pressed alone, we defer emitting SHARE/OPTIONS for
 // up to CHORD_WINDOW_MS to see if the other button follows.  If both arrive
-// within the window → emit TOUCHPAD instead.  BTN_RECORD (Xbox Series capture
-// button) maps directly to TOUCHPAD with no deferral.
+// within the window → emit TOUCHPAD instead.
 #define CHORD_WINDOW_MS 100
 
 typedef struct {
@@ -81,26 +67,36 @@ typedef struct {
 } ChordState;
 
 typedef struct {
-    int  fd;
+    int  fd;                    // -1 = free slot
     char path[64];
+    char name[128];
     int  abs_min[ABS_CNT];
     int  abs_max[ABS_CNT];
     int  abs_logged[ABS_CNT];   // last value logged in input_debug mode
     ChordState chord;
     PadProfile profile;         // evdev code → chiaki mapping for this device
+    ChiakiControllerState state;  // this pad's contribution
+    bool dirty;                 // state changed since the last SYN_REPORT
+    bool dropped;               // SYN_DROPPED seen: ignore events until next SYN_REPORT, then resync
 } GamepadDev;
 
 struct InputContext {
-    ChiakiControllerState state;
-    pthread_mutex_t       state_mutex;
+    pthread_mutex_t       state_mutex;   // guards everything below + session sends
+    ChiakiControllerState remote_state;  // TV remote (SDL keyboard events)
+    ChiakiControllerState last_sent;
+    bool                  have_last_sent;
 
     GamepadDev    pads[MAX_GAMEPADS];
-    int           num_pads;
 
     pthread_t     reader_thread;
     volatile bool running;
     bool          debug;
     char          profile_override[32];
+
+    int             inotify_fd;          // -1 if unavailable
+    bool            rescan_pending;
+    struct timespec rescan_at;
+    struct timespec last_scan;
 
     ChiakiSession *session;
 };
@@ -115,7 +111,15 @@ static int16_t normalize_axis(int val, int min, int max)
     return (int16_t)scaled;
 }
 
-// ── Monotonic clock helper ─────────────────────────────────────────────────────
+static uint8_t normalize_trigger(int val, int min, int max)
+{
+    if (max <= min) return 0;
+    if (val <= min) return 0;
+    if (val >= max) return 255;
+    return (uint8_t)(((int64_t)(val - min) * 255) / (max - min));
+}
+
+// ── Monotonic clock helpers ────────────────────────────────────────────────────
 static void get_monotonic(struct timespec *ts)
 {
     clock_gettime(CLOCK_MONOTONIC, ts);
@@ -127,6 +131,28 @@ static long ms_elapsed(const struct timespec *from)
     get_monotonic(&now);
     return (now.tv_sec - from->tv_sec) * 1000L +
            (now.tv_nsec - from->tv_nsec) / 1000000L;
+}
+
+// ── Send the combined state of all pads + TV remote to the session ────────────
+// Caller holds state_mutex.  Sending under the mutex means that once
+// input_set_session(ctx, NULL) returns, no send to the old session is in flight.
+static void publish_locked(InputContext *ctx, ChiakiSession *session, bool force)
+{
+    ChiakiControllerState out = ctx->remote_state;
+    for (int i = 0; i < MAX_GAMEPADS; i++) {
+        if (ctx->pads[i].fd < 0) continue;
+        ChiakiControllerState merged;
+        chiaki_controller_state_or(&merged, &out, &ctx->pads[i].state);
+        out = merged;
+    }
+
+    if (!force && ctx->have_last_sent && chiaki_controller_state_equals(&out, &ctx->last_sent))
+        return;
+    ctx->last_sent = out;
+    ctx->have_last_sent = true;
+
+    if (session)
+        chiaki_session_set_controller_state(session, &out);
 }
 
 // ── Flush a deferred chord-pending button as its normal mapping ───────────────
@@ -226,157 +252,74 @@ static bool apply_key_event(ChiakiControllerState *st, GamepadDev *pad,
     return true;
 }
 
-static uint8_t normalize_trigger(int val, int min, int max)
-{
-    if (max <= min) return 0;
-    if (val <= min) return 0;
-    if (val >= max) return 255;
-    return (uint8_t)(((int64_t)(val - min) * 255) / (max - min));
-}
-
 // ── Map evdev EV_ABS → chiaki sticks/triggers/dpad ────────────────────────────
-static void apply_abs_event(ChiakiControllerState *st, GamepadDev *pad,
-                             uint16_t code, int32_t val)
+static bool apply_abs_event(ChiakiControllerState *st, GamepadDev *pad,
+                            uint16_t code, int32_t val)
 {
-    if (code >= ABS_CNT) return;
+    if (code >= ABS_CNT) return false;
     int min = pad->abs_min[code];
     int max = pad->abs_max[code];
 
     // Which evdev axis is which stick/trigger depends on the driver; the
     // per-controller profile (src/pad_profile.c) says.
     switch (pad_profile_axis(&pad->profile, code)) {
-    case PAD_AXIS_LX: st->left_x  = normalize_axis(val, min, max); break;
-    case PAD_AXIS_LY: st->left_y  = normalize_axis(val, min, max); break;
-    case PAD_AXIS_RX: st->right_x = normalize_axis(val, min, max); break;
-    case PAD_AXIS_RY: st->right_y = normalize_axis(val, min, max); break;
-    case PAD_AXIS_L2: st->l2_state = normalize_trigger(val, min, max); break;
-    case PAD_AXIS_R2: st->r2_state = normalize_trigger(val, min, max); break;
+    case PAD_AXIS_LX: st->left_x  = normalize_axis(val, min, max); return true;
+    case PAD_AXIS_LY: st->left_y  = normalize_axis(val, min, max); return true;
+    case PAD_AXIS_RX: st->right_x = normalize_axis(val, min, max); return true;
+    case PAD_AXIS_RY: st->right_y = normalize_axis(val, min, max); return true;
+    case PAD_AXIS_L2: st->l2_state = normalize_trigger(val, min, max); return true;
+    case PAD_AXIS_R2: st->r2_state = normalize_trigger(val, min, max); return true;
     case PAD_AXIS_HATX:
         st->buttons &= ~(CHIAKI_CONTROLLER_BUTTON_DPAD_LEFT |
                          CHIAKI_CONTROLLER_BUTTON_DPAD_RIGHT);
         if (val < 0) st->buttons |= CHIAKI_CONTROLLER_BUTTON_DPAD_LEFT;
         if (val > 0) st->buttons |= CHIAKI_CONTROLLER_BUTTON_DPAD_RIGHT;
-        break;
+        return true;
     case PAD_AXIS_HATY:
         st->buttons &= ~(CHIAKI_CONTROLLER_BUTTON_DPAD_UP |
                          CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN);
         if (val < 0) st->buttons |= CHIAKI_CONTROLLER_BUTTON_DPAD_UP;
         if (val > 0) st->buttons |= CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN;
-        break;
-    default: break;
+        return true;
+    default:
+        return false;
     }
 }
 
-// ── Evdev reader thread ────────────────────────────────────────────────────────
-static void *evdev_reader(void *arg)
+// ── Rebuild a pad's state from the kernel's current view ───────────────────────
+// Used after SYN_DROPPED (event queue overflow) and when a pad is first opened,
+// so a button held at that moment is not lost.  Caller holds state_mutex.
+static void resync_pad_locked(GamepadDev *pad)
 {
-    InputContext *ctx = (InputContext *)arg;
+    uint8_t keys[(KEY_MAX + 7) / 8 + 1];
+    memset(keys, 0, sizeof(keys));
+    ioctl(pad->fd, EVIOCGKEY(sizeof(keys)), keys);
 
-    while (ctx->running) {
-        fd_set rfds;
-        FD_ZERO(&rfds);
-        int maxfd = -1;
+    chiaki_controller_state_set_idle(&pad->state);
+    memset(&pad->chord, 0, sizeof(pad->chord));
 
-        for (int i = 0; i < ctx->num_pads; i++) {
-            if (ctx->pads[i].fd >= 0) {
-                FD_SET(ctx->pads[i].fd, &rfds);
-                if (ctx->pads[i].fd > maxfd)
-                    maxfd = ctx->pads[i].fd;
-            }
-        }
+    for (unsigned code = 0x100; code < 0x2ff; code++)
+        if (EVDEV_BITS_TEST(keys, code))
+            apply_key_event(&pad->state, pad, (uint16_t)code, 1);
+    // No chord deferral on resync: a held Select/Start counts as pressed.
+    if (pad->chord.pending_btn)
+        chord_flush_pending(&pad->state, &pad->chord);
+    pad->chord.tap_pending = 0;
 
-        if (maxfd < 0) { usleep(50000); continue; }
-
-        struct timeval tv = { .tv_sec = 0, .tv_usec = 20000 }; // 20ms for chord responsiveness
-        int sel = select(maxfd + 1, &rfds, NULL, NULL, &tv);
-
-        // ── Check chord timeouts on every iteration (even if no events) ──────
-        for (int i = 0; i < ctx->num_pads; i++) {
-            ChordState *ch = &ctx->pads[i].chord;
-            if (ch->pending_btn && ms_elapsed(&ch->pending_ts) >= CHORD_WINDOW_MS) {
-                pthread_mutex_lock(&ctx->state_mutex);
-                chord_flush_pending(&ctx->state, ch);
-                ChiakiControllerState snap = ctx->state;
-                pthread_mutex_unlock(&ctx->state_mutex);
-                if (ctx->session)
-                    chiaki_session_set_controller_state(ctx->session, &snap);
-            }
-        }
-
-        if (sel <= 0) continue;
-
-        for (int i = 0; i < ctx->num_pads; i++) {
-            if (ctx->pads[i].fd < 0) continue;
-            if (!FD_ISSET(ctx->pads[i].fd, &rfds)) continue;
-
-            struct input_event ev;
-            ssize_t n = read(ctx->pads[i].fd, &ev, sizeof(ev));
-            if (n < 0) {
-                if (errno == EAGAIN || errno == EINTR) continue;
-                app_log("[INPUT] Gamepad %s disconnected\n", ctx->pads[i].path);
-                close(ctx->pads[i].fd);
-                ctx->pads[i].fd = -1;
-                continue;
-            }
-            if (n != sizeof(ev)) continue;
-
-            if (ctx->debug) {
-                GamepadDev *pd = &ctx->pads[i];
-                const char *dev = strrchr(pd->path, '/') + 1;
-                if (ev.type == EV_KEY) {
-                    const char *nm = pad_diag_key_name(ev.code);
-                    app_log_always("[PADEV] %s KEY 0x%03x %s %d\n", dev, ev.code,
-                                   nm ? nm : "?", ev.value);
-                } else if (ev.type == EV_ABS && ev.code < ABS_CNT &&
-                           pad_diag_abs_significant(ev.value, pd->abs_min[ev.code],
-                                                    pd->abs_max[ev.code],
-                                                    &pd->abs_logged[ev.code])) {
-                    const char *nm = pad_diag_abs_name(ev.code);
-                    app_log_always("[PADEV] %s ABS 0x%02x %s %d\n", dev, ev.code,
-                                   nm ? nm : "?", ev.value);
-                }
-            }
-
-            bool changed = false;
-            pthread_mutex_lock(&ctx->state_mutex);
-
-            if      (ev.type == EV_KEY) { changed = apply_key_event(&ctx->state, &ctx->pads[i], ev.code, ev.value); }
-            else if (ev.type == EV_ABS) { apply_abs_event(&ctx->state, &ctx->pads[i], ev.code, ev.value); changed = true; }
-
-            ChiakiControllerState snap = ctx->state;
-            pthread_mutex_unlock(&ctx->state_mutex);
-
-            if (changed && ctx->session)
-                chiaki_session_set_controller_state(ctx->session, &snap);
-
-            // Handle deferred tap release: button was tapped+released while
-            // still pending — we sent the press above, now immediately release.
-            if (ctx->pads[i].chord.tap_pending) {
-                pthread_mutex_lock(&ctx->state_mutex);
-                ctx->state.buttons &= ~ctx->pads[i].chord.tap_pending;
-                ctx->pads[i].chord.tap_pending = 0;
-                ChiakiControllerState snap2 = ctx->state;
-                pthread_mutex_unlock(&ctx->state_mutex);
-                if (ctx->session)
-                    chiaki_session_set_controller_state(ctx->session, &snap2);
-            }
-        }
+    for (unsigned axis = 0; axis < ABS_CNT; axis++) {
+        if (pad_profile_axis(&pad->profile, (uint16_t)axis) == PAD_AXIS_NONE) continue;
+        struct input_absinfo ai;
+        if (ioctl(pad->fd, EVIOCGABS(axis), &ai) == 0)
+            apply_abs_event(&pad->state, pad, (uint16_t)axis, ai.value);
     }
-
-    return NULL;
 }
 
 // ── Check if evdev node is a physical gamepad ──────────────────────────────────
 static bool is_gamepad(int fd, const char *name)
 {
     // Skip the virtual LGE/LG mirrored devices that webOS hidd creates.
-    // These are system-managed views of the physical controller; hidd still
-    // intercepts B→Back / A→OK at the protocol level for these nodes.
-    // The physical evdev node (e.g., "Sony DualSense") is what we want.
-    if (strncmp(name, "LGE", 3) == 0 || strncmp(name, "LG ", 3) == 0) {
-        app_log("[INPUT] Ignoring virtual LG device: \"%s\"\n", name);
+    if (strncmp(name, "LGE", 3) == 0 || strncmp(name, "LG ", 3) == 0)
         return false;
-    }
 
     uint8_t keybits[(KEY_MAX + 7) / 8];
     memset(keybits, 0, sizeof(keybits));
@@ -392,122 +335,279 @@ static bool is_gamepad(int fd, const char *name)
     memset(absbits, 0, sizeof(absbits));
     ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(absbits)), absbits);
 
-    bool has_sticks = EVDEV_BITS_TEST(absbits, ABS_X) && EVDEV_BITS_TEST(absbits, ABS_Y);
-    if (!has_sticks) {
-        app_log("[INPUT] Skipping \"%s\" - no analog sticks (ABS_X/Y)\n", name);
-        return false;
-    }
-    return true;
+    return EVDEV_BITS_TEST(absbits, ABS_X) && EVDEV_BITS_TEST(absbits, ABS_Y);
 }
 
-// ── Open and exclusively grab all physical gamepads ───────────────────────────
-static void open_gamepads(InputContext *ctx)
+static bool pad_path_open(InputContext *ctx, const char *path)
 {
-    ctx->num_pads = 0;
-    for (int i = 0; i < MAX_GAMEPADS; i++) {
-        ctx->pads[i].fd = -1;
-        ctx->pads[i].path[0] = '\0';
-        memset(&ctx->pads[i].chord, 0, sizeof(ChordState));
+    for (int i = 0; i < MAX_GAMEPADS; i++)
+        if (ctx->pads[i].fd >= 0 && strcmp(ctx->pads[i].path, path) == 0)
+            return true;
+    return false;
+}
+
+// ── Open, classify and exclusively grab one evdev node if it is a gamepad ─────
+// Caller holds state_mutex.
+static void try_open_pad_locked(InputContext *ctx, const char *path)
+{
+    if (pad_path_open(ctx, path)) return;
+
+    int slot = -1;
+    for (int i = 0; i < MAX_GAMEPADS; i++)
+        if (ctx->pads[i].fd < 0) { slot = i; break; }
+    if (slot < 0) return;
+
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) return;
+
+    char devname[128] = {0};
+    ioctl(fd, EVIOCGNAME(sizeof(devname) - 1), devname);
+
+    if (!is_gamepad(fd, devname)) { close(fd); return; }
+
+    // Real controllers sit behind a kernel HID/USB driver.  LG's virtual
+    // remote/IME nodes ("Smart Remote RCU Input", "LGE Network Input")
+    // have none, yet advertise every key and axis.
+    char drv[64];
+    pad_diag_evdev_driver(path, drv, sizeof(drv));
+    if (!drv[0]) { close(fd); return; }
+
+    GamepadDev *pad = &ctx->pads[slot];
+    memset(pad, 0, sizeof(*pad));
+    pad->fd = -1;
+
+    // Read axis ranges for proper normalization
+    int abs_value[ABS_CNT];
+    memset(abs_value, 0, sizeof(abs_value));
+    for (int axis = 0; axis < ABS_CNT; axis++) {
+        struct input_absinfo info;
+        if (ioctl(fd, EVIOCGABS(axis), &info) == 0) {
+            pad->abs_min[axis] = info.minimum;
+            pad->abs_max[axis] = info.maximum;
+            pad->abs_logged[axis] = info.value;
+            abs_value[axis] = info.value;
+        }
     }
+
+    struct input_id id;
+    memset(&id, 0, sizeof(id));
+    ioctl(fd, EVIOCGID, &id);
+
+    uint8_t keybits[(KEY_MAX + 7) / 8 + 1];
+    uint8_t absbits[(ABS_MAX + 7) / 8 + 1];
+    memset(keybits, 0, sizeof(keybits));
+    memset(absbits, 0, sizeof(absbits));
+    ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keybits)), keybits);
+    ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(absbits)), absbits);
+
+    PadDeviceInfo info = {
+        .bustype = id.bustype, .vendor = id.vendor, .product = id.product,
+        .driver = drv, .keybits = keybits, .absbits = absbits,
+        .abs_min = pad->abs_min, .abs_max = pad->abs_max, .abs_value = abs_value,
+    };
+    pad->profile = pad_profile_select(&info, ctx->profile_override);
+
+    // EVIOCGRAB: take exclusive ownership for the whole app lifetime (also
+    // between reconnect attempts), so webOS's hidd/compositor never see this
+    // pad — no B→Back, A→OK, Guide→Home interceptions.  SDL's own fd for the
+    // device stops receiving events too; we route everything ourselves.
+    if (ioctl(fd, EVIOCGRAB, 1) < 0) {
+        app_log_always("[INPUT] EVIOCGRAB FAILED for \"%s\" %s: %s\n",
+                       devname, path, strerror(errno));
+        app_log_always("[INPUT] System button intercept (B=Back, A=OK) may still occur\n");
+    }
+
+    snprintf(pad->path, sizeof(pad->path), "%s", path);
+    snprintf(pad->name, sizeof(pad->name), "%s", devname);
+    pad->fd = fd;
+    resync_pad_locked(pad);
+
+    app_log_always("[INPUT] Opened gamepad: \"%s\" @ %s bus=0x%02x vid=%04x pid=%04x driver=%s "
+                   "profile=%s (%s)%s\n",
+                   devname, path, id.bustype, id.vendor, id.product, drv,
+                   pad->profile.id, pad->profile.description,
+                   pad->profile.chord_touchpad ? " touchpad=Select+Start chord" : "");
+}
+
+// Caller holds state_mutex.
+static void close_pad_locked(InputContext *ctx, int i, const char *why)
+{
+    GamepadDev *pad = &ctx->pads[i];
+    if (pad->fd < 0) return;
+    app_log_always("[INPUT] Gamepad \"%s\" (%s) removed: %s\n", pad->name, pad->path, why);
+    ioctl(pad->fd, EVIOCGRAB, 0);
+    close(pad->fd);
+    pad->fd = -1;
+    // Its held buttons/sticks must not stay pressed on the PS5.
+    chiaki_controller_state_set_idle(&pad->state);
+    publish_locked(ctx, ctx->session, false);
+}
+
+// Scan /dev/input for gamepads not opened yet.  Caller holds state_mutex.
+static void scan_pads_locked(InputContext *ctx)
+{
+    get_monotonic(&ctx->last_scan);
+    ctx->rescan_pending = false;
 
     DIR *dir = opendir("/dev/input");
     if (!dir) {
         app_log("[INPUT] opendir(/dev/input) failed: %s\n", strerror(errno));
         return;
     }
-
     struct dirent *ent;
-    while ((ent = readdir(dir)) != NULL && ctx->num_pads < MAX_GAMEPADS) {
+    while ((ent = readdir(dir)) != NULL) {
         if (strncmp(ent->d_name, "event", 5) != 0) continue;
-
         char path[64];
         snprintf(path, sizeof(path), "/dev/input/%s", ent->d_name);
-
-        int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-        if (fd < 0) continue;
-
-        char devname[256] = {0};
-        ioctl(fd, EVIOCGNAME(sizeof(devname) - 1), devname);
-
-        if (!is_gamepad(fd, devname)) { close(fd); continue; }
-
-        // Real controllers sit behind a kernel HID/USB driver.  LG's virtual
-        // remote/IME nodes ("Smart Remote RCU Input", "LGE Network Input")
-        // have none, yet advertise every key and axis.
-        char drv[64];
-        pad_diag_evdev_driver(path, drv, sizeof(drv));
-        if (!drv[0]) {
-            app_log("[INPUT] Skipping \"%s\" - no kernel driver (virtual device)\n", devname);
-            close(fd);
-            continue;
-        }
-
-        GamepadDev *pad = &ctx->pads[ctx->num_pads];
-
-        // Read axis ranges for proper normalization
-        int abs_value[ABS_CNT];
-        memset(abs_value, 0, sizeof(abs_value));
-        for (int axis = 0; axis < ABS_CNT; axis++) {
-            struct input_absinfo info;
-            pad->abs_min[axis] = pad->abs_max[axis] = pad->abs_logged[axis] = 0;
-            if (ioctl(fd, EVIOCGABS(axis), &info) == 0) {
-                pad->abs_min[axis] = info.minimum;
-                pad->abs_max[axis] = info.maximum;
-                pad->abs_logged[axis] = info.value;
-                abs_value[axis] = info.value;
-            }
-        }
-
-        struct input_id id;
-        memset(&id, 0, sizeof(id));
-        ioctl(fd, EVIOCGID, &id);
-
-        uint8_t keybits[(KEY_MAX + 7) / 8 + 1];
-        uint8_t absbits[(ABS_MAX + 7) / 8 + 1];
-        memset(keybits, 0, sizeof(keybits));
-        memset(absbits, 0, sizeof(absbits));
-        ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keybits)), keybits);
-        ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(absbits)), absbits);
-
-        PadDeviceInfo info = {
-            .bustype = id.bustype, .vendor = id.vendor, .product = id.product,
-            .driver = drv, .keybits = keybits, .absbits = absbits,
-            .abs_min = pad->abs_min, .abs_max = pad->abs_max, .abs_value = abs_value,
-        };
-        pad->profile = pad_profile_select(&info, ctx->profile_override);
-
-        // EVIOCGRAB: take exclusive ownership.
-        // Once grabbed, webOS's hidd daemon and Wayland compositor can no longer
-        // see events from this device — B→Back, A→OK, Guide→Home system
-        // interceptions are all suppressed.  Only our process receives events.
-        //
-        // Because SDL also opens /dev/input/event* for its joystick subsystem,
-        // SDL's fd will stop receiving events after our grab. That is intentional:
-        // we read and route events ourselves in evdev_reader(), completely
-        // bypassing SDL's SDL_CONTROLLERBUTTON path.
-        if (ioctl(fd, EVIOCGRAB, 1) < 0) {
-            app_log_always("[INPUT] EVIOCGRAB FAILED for \"%s\" %s: %s\n",
-                           devname, path, strerror(errno));
-            app_log_always("[INPUT] System button intercept (B=Back, A=OK) may still occur\n");
-        } else {
-            app_log("[INPUT] EVIOCGRAB OK — exclusive control of \"%s\" (%s)\n",
-                    devname, path);
-        }
-
-        snprintf(pad->path, sizeof(pad->path), "%s", path);
-        pad->fd = fd;
-        ctx->num_pads++;
-
-        app_log_always("[INPUT] Opened gamepad: \"%s\" @ %s bus=0x%02x vid=%04x pid=%04x driver=%s "
-                       "profile=%s (%s)%s\n",
-                       devname, path, id.bustype, id.vendor, id.product, drv,
-                       pad->profile.id, pad->profile.description,
-                       pad->profile.chord_touchpad ? " touchpad=Select+Start chord" : "");
+        try_open_pad_locked(ctx, path);
     }
     closedir(dir);
 
-    if (ctx->num_pads == 0)
-        app_log_always("[INPUT] No physical gamepads found — TV remote only\n");
+    // A pad that just appeared may already have buttons held.
+    publish_locked(ctx, ctx->session, false);
+}
+
+static int count_pads(InputContext *ctx)
+{
+    int n = 0;
+    for (int i = 0; i < MAX_GAMEPADS; i++)
+        if (ctx->pads[i].fd >= 0) n++;
+    return n;
+}
+
+// ── Handle one batch of events from a pad ──────────────────────────────────────
+// Caller holds state_mutex.
+static void handle_pad_events_locked(InputContext *ctx, int i)
+{
+    GamepadDev *pad = &ctx->pads[i];
+    struct input_event evs[64];
+
+    for (;;) {
+        ssize_t n = read(pad->fd, evs, sizeof(evs));
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EINTR) return;
+            close_pad_locked(ctx, i, strerror(errno));   // ENODEV on unplug / BT drop
+            return;
+        }
+        if (n == 0) return;
+
+        int count = (int)(n / (ssize_t)sizeof(evs[0]));
+        for (int k = 0; k < count; k++) {
+            struct input_event *ev = &evs[k];
+
+            if (ev->type == EV_SYN) {
+                if (ev->code == SYN_DROPPED) {
+                    pad->dropped = true;
+                } else if (ev->code == SYN_REPORT) {
+                    if (pad->dropped) {
+                        pad->dropped = false;
+                        app_log("[INPUT] %s: SYN_DROPPED, resyncing\n", pad->path);
+                        resync_pad_locked(pad);
+                        pad->dirty = true;
+                    }
+                    if (pad->dirty) {
+                        pad->dirty = false;
+                        publish_locked(ctx, ctx->session, false);
+                    }
+                    // Quick Select/Start tap on chord pads: press went out above,
+                    // release now so the PS5 sees a full tap.
+                    if (pad->chord.tap_pending) {
+                        pad->state.buttons &= ~pad->chord.tap_pending;
+                        pad->chord.tap_pending = 0;
+                        publish_locked(ctx, ctx->session, false);
+                    }
+                }
+                continue;
+            }
+            if (pad->dropped) continue;
+
+            if (ctx->debug) {
+                const char *dev = strrchr(pad->path, '/') + 1;
+                if (ev->type == EV_KEY) {
+                    const char *nm = pad_diag_key_name(ev->code);
+                    app_log_always("[PADEV] %s KEY 0x%03x %s %d\n", dev, ev->code,
+                                   nm ? nm : "?", ev->value);
+                } else if (ev->type == EV_ABS && ev->code < ABS_CNT &&
+                           pad_diag_abs_significant(ev->value, pad->abs_min[ev->code],
+                                                    pad->abs_max[ev->code],
+                                                    &pad->abs_logged[ev->code])) {
+                    const char *nm = pad_diag_abs_name(ev->code);
+                    app_log_always("[PADEV] %s ABS 0x%02x %s %d\n", dev, ev->code,
+                                   nm ? nm : "?", ev->value);
+                }
+            }
+
+            if (ev->type == EV_KEY)
+                pad->dirty |= apply_key_event(&pad->state, pad, ev->code, ev->value);
+            else if (ev->type == EV_ABS)
+                pad->dirty |= apply_abs_event(&pad->state, pad, ev->code, ev->value);
+        }
+    }
+}
+
+// ── Evdev reader thread ────────────────────────────────────────────────────────
+static void *evdev_reader(void *arg)
+{
+    InputContext *ctx = (InputContext *)arg;
+
+    while (ctx->running) {
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        int maxfd = -1;
+
+        pthread_mutex_lock(&ctx->state_mutex);
+        for (int i = 0; i < MAX_GAMEPADS; i++) {
+            if (ctx->pads[i].fd >= 0) {
+                FD_SET(ctx->pads[i].fd, &rfds);
+                if (ctx->pads[i].fd > maxfd) maxfd = ctx->pads[i].fd;
+            }
+        }
+        pthread_mutex_unlock(&ctx->state_mutex);
+        if (ctx->inotify_fd >= 0) {
+            FD_SET(ctx->inotify_fd, &rfds);
+            if (ctx->inotify_fd > maxfd) maxfd = ctx->inotify_fd;
+        }
+
+        struct timeval tv = { .tv_sec = 0, .tv_usec = 20000 }; // 20ms for chord responsiveness
+        int sel = (maxfd >= 0) ? select(maxfd + 1, &rfds, NULL, NULL, &tv)
+                               : (usleep(20000), 0);
+
+        pthread_mutex_lock(&ctx->state_mutex);
+
+        // ── Hotplug ──────────────────────────────────────────────────────────
+        if (sel > 0 && ctx->inotify_fd >= 0 && FD_ISSET(ctx->inotify_fd, &rfds)) {
+            char buf[4096];
+            while (read(ctx->inotify_fd, buf, sizeof(buf)) > 0) { /* drain */ }
+            ctx->rescan_pending = true;
+            get_monotonic(&ctx->rescan_at);
+        }
+        if ((ctx->rescan_pending && ms_elapsed(&ctx->rescan_at) >= RESCAN_DELAY_MS) ||
+            (ctx->inotify_fd < 0 && ms_elapsed(&ctx->last_scan) >= RESCAN_FALLBACK_MS))
+            scan_pads_locked(ctx);
+
+        // ── Chord timeouts (checked every iteration, even without events) ────
+        for (int i = 0; i < MAX_GAMEPADS; i++) {
+            GamepadDev *pad = &ctx->pads[i];
+            if (pad->fd < 0) continue;
+            if (pad->chord.pending_btn && ms_elapsed(&pad->chord.pending_ts) >= CHORD_WINDOW_MS) {
+                chord_flush_pending(&pad->state, &pad->chord);
+                publish_locked(ctx, ctx->session, false);
+            }
+        }
+
+        // ── Pad events ───────────────────────────────────────────────────────
+        if (sel > 0) {
+            for (int i = 0; i < MAX_GAMEPADS; i++) {
+                int fd = ctx->pads[i].fd;
+                if (fd >= 0 && FD_ISSET(fd, &rfds))
+                    handle_pad_events_locked(ctx, i);
+            }
+        }
+
+        pthread_mutex_unlock(&ctx->state_mutex);
+    }
+
+    return NULL;
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────────
@@ -539,18 +639,35 @@ InputContext *input_init(bool debug, const char *profile_override)
     InputContext *ctx = calloc(1, sizeof(*ctx));
     if (!ctx) return NULL;
 
-    chiaki_controller_state_set_idle(&ctx->state);
+    chiaki_controller_state_set_idle(&ctx->remote_state);
     pthread_mutex_init(&ctx->state_mutex, NULL);
     ctx->running = true;
     ctx->session = NULL;
     ctx->debug   = debug;
+    for (int i = 0; i < MAX_GAMEPADS; i++) ctx->pads[i].fd = -1;
     snprintf(ctx->profile_override, sizeof(ctx->profile_override), "%s",
              profile_override ? profile_override : "auto");
     app_log_always("[INPUT] controller_profile=%s (choices: %s)\n",
                    ctx->profile_override, pad_profile_ids());
 
     log_controller_diagnostics(debug);
-    open_gamepads(ctx);
+
+    ctx->inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    if (ctx->inotify_fd >= 0 &&
+        inotify_add_watch(ctx->inotify_fd, "/dev/input", IN_CREATE | IN_ATTRIB) < 0) {
+        close(ctx->inotify_fd);
+        ctx->inotify_fd = -1;
+    }
+    if (ctx->inotify_fd < 0)
+        app_log_always("[INPUT] inotify unavailable (%s) — rescanning every %d ms\n",
+                       strerror(errno), RESCAN_FALLBACK_MS);
+
+    pthread_mutex_lock(&ctx->state_mutex);
+    scan_pads_locked(ctx);
+    int n = count_pads(ctx);
+    pthread_mutex_unlock(&ctx->state_mutex);
+    if (n == 0)
+        app_log_always("[INPUT] No gamepads yet — TV remote only until one connects\n");
 
     pthread_create(&ctx->reader_thread, NULL, evdev_reader, ctx);
     return ctx;
@@ -558,7 +675,14 @@ InputContext *input_init(bool debug, const char *profile_override)
 
 void input_set_session(InputContext *ctx, ChiakiSession *session)
 {
-    if (ctx) ctx->session = session;
+    if (!ctx) return;
+    pthread_mutex_lock(&ctx->state_mutex);
+    ctx->session = session;
+    // New session starts from the current physical state (e.g. a button held
+    // across a reconnect).
+    if (session)
+        publish_locked(ctx, session, true);
+    pthread_mutex_unlock(&ctx->state_mutex);
 }
 
 void input_fini(InputContext *ctx)
@@ -566,12 +690,13 @@ void input_fini(InputContext *ctx)
     if (!ctx) return;
     ctx->running = false;
     pthread_join(ctx->reader_thread, NULL);
-    for (int i = 0; i < ctx->num_pads; i++) {
+    for (int i = 0; i < MAX_GAMEPADS; i++) {
         if (ctx->pads[i].fd >= 0) {
             ioctl(ctx->pads[i].fd, EVIOCGRAB, 0);
             close(ctx->pads[i].fd);
         }
     }
+    if (ctx->inotify_fd >= 0) close(ctx->inotify_fd);
     pthread_mutex_destroy(&ctx->state_mutex);
     free(ctx);
 }
@@ -601,10 +726,8 @@ void input_handle_event(SDL_Event *ev, InputContext *ctx, ChiakiSession *session
     else return;
 
     pthread_mutex_lock(&ctx->state_mutex);
-    if (pressed) ctx->state.buttons |= btn;
-    else         ctx->state.buttons &= ~btn;
-    ChiakiControllerState snap = ctx->state;
+    if (pressed) ctx->remote_state.buttons |= btn;
+    else         ctx->remote_state.buttons &= ~btn;
+    publish_locked(ctx, session, false);
     pthread_mutex_unlock(&ctx->state_mutex);
-
-    chiaki_session_set_controller_state(session, &snap);
 }
