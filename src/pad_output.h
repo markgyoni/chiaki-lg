@@ -34,3 +34,7 @@ void pad_output_close(PadOutput *o);   /* stops rumble first */
 void pad_output_rumble(PadOutput *o, uint8_t strong, uint8_t weak, long now_ms);
 
 const char *pad_output_kind_name(PadOutputKind k);
+
+/* Open (O_RDWR|O_NONBLOCK) the /dev/hidrawN that belongs to the same HID
+ * device as /dev/input/eventM, or -1. */
+int pad_output_open_sibling_hidraw(const char *event_path);

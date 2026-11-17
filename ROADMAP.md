@@ -141,13 +141,13 @@ Reference implementations (read these, don't guess offsets):
 - SDL `src/joystick/hidapi/SDL_hidapi_ps5.c`: BT enhanced-mode handling and the effects packet layout.
 
 Tasks:
-- [ ] Find the matching hidraw node: `/sys/class/hidraw/hidrawN/device` and `/sys/class/input/eventM/device/device` resolve to the same HID device, or compare `HIDIOCGRAWINFO` vendor/product.
-- [ ] Detect USB or BT from `HIDIOCGRAWINFO.bustype`.
-- [ ] Read the calibration feature report `0x05` (`HIDIOCGFEATURE`). On BT this also switches the pad from the short `0x01` report to the full `0x31` report. **Stage 0 finding:** on webOS 6 (BlueZ → uhid) the ioctl returns `EIO` but the switch to `0x31` still happens, so the calibration data must be fetched another way (retry, or fall back to hid-playstation's default calibration).
-- [ ] Parse the input report: USB `0x01`, 64 bytes; BT `0x31`, 78 bytes, same payload shifted by 1. Fields: sticks, triggers, buttons + hat, gyro, accel, sensor timestamp, two touch points (active flag, id, 12-bit x/y).
-- [ ] Fill `ChiakiControllerState` buttons, sticks and triggers from the report, with the same semantics as Stage 1.
-- [ ] Fall back to the Stage 1 `sony_generic` evdev profile if hidraw can't be opened.
-- [ ] Do the same for the DS4: USB `0x01`, BT `0x11`. Similar fields, different offsets, and the touchpad is 1920×942. This step is optional and can be its own sub-stage.
+- [x] Find the matching hidraw node: `/sys/class/hidraw/hidrawN/device` and `/sys/class/input/eventM/device/device` resolve to the same HID device, or compare `HIDIOCGRAWINFO` vendor/product.
+- [x] Detect USB or BT from `HIDIOCGRAWINFO.bustype`.
+- [x] Read the calibration feature report `0x05` (`HIDIOCGFEATURE`). On BT this also switches the pad from the short `0x01` report to the full `0x31` report. **Stage 0 finding:** on webOS 6 (BlueZ → uhid) the ioctl returns `EIO` but the switch to `0x31` still happens, so the calibration data must be fetched another way (retry, or fall back to hid-playstation's default calibration). **Implemented:** factory calibration is parsed when the request succeeds (USB); on webOS BT it fails, so motion uses nominal scale + automatic gyro bias (Stage 6).
+- [x] Parse the input report: USB `0x01`, 64 bytes; BT `0x31`, 78 bytes, same payload shifted by 1. Fields: sticks, triggers, buttons + hat, gyro, accel, sensor timestamp, two touch points (active flag, id, 12-bit x/y).
+- [x] Fill `ChiakiControllerState` buttons, sticks and triggers from the report, with the same semantics as Stage 1.
+- [x] Fall back to the Stage 1 `sony_generic` evdev profile if hidraw can't be opened.
+- [ ] (not started) Do the same for the DS4: USB `0x01`, BT `0x11`. Similar fields, different offsets, and the touchpad is 1920×942. This step is optional and can be its own sub-stage.
 
 **Done when:** with `input_debug` on, the log shows correct buttons, sticks, triggers, raw gyro/accel and touch coordinates from hidraw over both USB and BT.
 
@@ -155,9 +155,10 @@ Tasks:
 
 ## Stage 5: Touchpad
 
-- [ ] Map finger contacts to `chiaki_controller_state_start_touch`, `_set_touch_pos` and `_stop_touch`, tracking per-finger ids (two fingers max).
-- [ ] Scale coordinates to the coordinate space chiaki expects. Check how chiaki-ng's GUI controller code scales DualSense touch (PS5 vs PS4 host) and copy that.
-- [ ] Touchpad click → `CHIAKI_CONTROLLER_BUTTON_TOUCHPAD`. For non-touch pads, keep the chord/Share-button fallback.
+- [x] Map finger contacts to `chiaki_controller_state_start_touch`, `_set_touch_pos` and `_stop_touch`, tracking per-finger ids (two fingers max).
+- [x] Scale coordinates to the coordinate space chiaki expects. Check how chiaki-ng's GUI controller code scales DualSense touch (PS5 vs PS4 host) and copy that.
+- [x] Touchpad click → `CHIAKI_CONTROLLER_BUTTON_TOUCHPAD`. For non-touch pads, keep the chord/Share-button fallback.
+- [ ] **Follow-up (v0.3.0 test):** touch works but feels laggier/less precise than on a console. To investigate: chiaki sends every touch move as a feedback-history event (~195/s from BT); try coalescing to one move per ~8 ms frame, check coordinate scaling against chiaki-ng on PC, and measure report→send latency.
 
 **Done when:** swiping works in a game or menu that uses the touchpad (e.g. the PS5 home screen's touchpad scrolling, or Astro's Playroom), including two-finger touches and the click.
 
@@ -165,18 +166,19 @@ Tasks:
 
 ## Stage 6: Motion (gyro / accelerometer)
 
-- [ ] Apply calibration from feature report `0x05` (bias and sensitivity, see `dualsense_get_calibration_data` in hid-playstation).
-- [ ] Convert to the units chiaki-ng uses: gyro in rad/s, accel in g. Check chiaki-ng's SDL sensor path for the exact convention and axis order.
-- [ ] Fill `gyro_*`, `accel_*` and `orient_*`. chiaki-ng has an orientation tracker in `lib/include/chiaki/orientation.h`; feed it gyro/accel + timestamp and apply it to the controller state. Confirm the API in your checkout.
-- [ ] Handle `CHIAKI_EVENT_MOTION_RESET` by resetting the tracker.
+- [x] Apply calibration from feature report `0x05` (bias and sensitivity, see `dualsense_get_calibration_data` in hid-playstation).
+- [x] Convert to the units chiaki-ng uses: gyro in rad/s, accel in g. Check chiaki-ng's SDL sensor path for the exact convention and axis order.
+- [x] Fill `gyro_*`, `accel_*` and `orient_*`. chiaki-ng has an orientation tracker in `lib/include/chiaki/orientation.h`; feed it gyro/accel + timestamp and apply it to the controller state. Confirm the API in your checkout.
+- [x] Handle `CHIAKI_EVENT_MOTION_RESET` by resetting the tracker.
 
 **Done when:** gyro aiming works in a game with motion controls, without drift or inverted axes.
+**Status (2026-11-16, v0.3.1):** passed on the TV (DualSense BT, nominal scale + auto bias). Stages 4 and 5 passed too (touch latency follow-up open).
 
 ---
 
 ## Stage 7: DualSense mode + outputs (rumble, adaptive triggers, lightbar)
 
-- [ ] When a DualSense is the active pad and `cfg.ps5`: set `info.enable_dualsense = true` (`main.c`, connect info). Make it a config toggle.
+- [x] When a DualSense is the active pad and `cfg.ps5`: set `info.enable_dualsense = true` (`main.c`, connect info). Make it a config toggle.
 - [ ] Build the output report: USB `0x02` (48 bytes); BT `0x31` (78 bytes, with a sequence tag and a **CRC32 over seed byte `0xA2` + report**). Send it with `write()` on hidraw from the input thread, only when something changes, and rate-limited.
 - [ ] **Rumble**: `CHIAKI_EVENT_RUMBLE` → motor bytes, using compatible-vibration flags.
 - [ ] **Adaptive triggers**: `CHIAKI_EVENT_TRIGGER_EFFECTS` → `type_left` + `left[10]` / `type_right` + `right[10]` copied into the right/left trigger effect blocks, with the trigger-effect enable flags set.
@@ -193,9 +195,9 @@ Tasks:
 
 **Why:** with `enable_dualsense`, PS5 games often send their vibration as a *haptics audio stream* instead of rumble events.
 
-- [ ] Register a haptics sink with `chiaki_session_set_haptics_sink`. The callbacks get low-rate PCM.
-- [ ] Turn the stream into motor values, as chiaki-ng does for controllers without HD haptics: an amplitude envelope per channel → left/right motor. Find and reuse the logic in the chiaki-ng GUI.
-- [ ] Feed the result into the same output path as Stage 7 (DualSense) and Stage 3 (other pads).
+- [x] Register a haptics sink with `chiaki_session_set_haptics_sink`. The callbacks get low-rate PCM.
+- [x] Turn the stream into motor values, as chiaki-ng does for controllers without HD haptics: an amplitude envelope per channel → left/right motor. Find and reuse the logic in the chiaki-ng GUI.
+- [x] Feed the result into the same output path as Stage 7 (DualSense) and Stage 3 (other pads).
 
 **Done when:** games that only use haptics still produce vibration.
 

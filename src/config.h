@@ -26,6 +26,8 @@ typedef struct {
     char    *psn_refresh_token; // long-lived OAuth2 refresh token (optional)
     bool     input_debug;       // log every raw gamepad event + sample hidraw reports
     bool     rumble;            // forward PS5 rumble to controllers
+    bool     dualsense_hid;     // read DualSense via raw HID (touchpad, motion)
+    bool     motion;            // forward DualSense gyro/accel to the PS5
     char    *controller_profile; // "auto" or a pad_profile id (sony_generic, xbox_bt, ...)
 } AppConfig;
 
