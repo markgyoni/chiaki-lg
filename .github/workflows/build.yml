@@ -108,7 +108,10 @@ jobs:
         run: |
           gh release download -R webosbrew/dev-toolbox-cli -p 'webosbrew-toolbox-ipk-verify_*_amd64.deb' -p 'webosbrew-toolbox-fw-symbols_*_amd64.deb' -D /tmp/toolbox
           sudo apt-get install -y -q /tmp/toolbox/*.deb
-          webosbrew-ipk-verify -f markdown -d -o "$GITHUB_STEP_SUMMARY" build-webos/*.ipk
+          rc=0
+          webosbrew-ipk-verify -f markdown -d -o /tmp/verify.md build-webos/*.ipk || rc=$?
+          cat /tmp/verify.md | tee -a "$GITHUB_STEP_SUMMARY"
+          exit $rc
 
       - uses: actions/upload-artifact@v4
         with:
