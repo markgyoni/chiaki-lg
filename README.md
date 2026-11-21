@@ -22,7 +22,7 @@ Chiaki-webOS is a Remote Play app for LG webOS TVs. It streams your PlayStation 
 
 ## What you need
 
-- An LG TV with **webOS 4 or newer** and the [Homebrew Channel](https://www.webosbrew.org/) installed
+- An LG TV with **webOS 4 or newer**, in Developer Mode or rooted with the [Homebrew Channel](https://www.webosbrew.org/)
 - A **PS5 or PS4** with Remote Play turned on, on the same home network as the TV
 - A **controller** connected to the TV (Bluetooth or USB)
 
@@ -30,9 +30,7 @@ A wired network connection for the console (and ideally the TV) gives the smooth
 
 ## Install
 
-**From the Homebrew Channel** (recommended): open the Homebrew Channel on your TV, find **Chiaki-webOS** and install it.
-
-**Manually**: download the `.ipk` file from the [latest release](../../releases/latest) and install it with [webOS Dev Manager](https://github.com/webosbrew/dev-manager-desktop).
+Download the `.ipk` file from the [latest release](../../releases/latest) and install it with [webOS Dev Manager](https://github.com/webosbrew/dev-manager-desktop).
 
 ## Get started
 
@@ -48,7 +46,7 @@ To wake the PS5 from rest mode, turn on **Settings › System › Power Saving �
 
 | | |
 |---|---|
-| **Back** on the remote, or **Down** twice | Leave the game and go back to the menu |
+| **Back** or **Down** on the remote | Leave the game (asks first) |
 | **Up** on the remote, or tap **Mute** on the DualSense | Show or hide the connection info |
 | Hold **Mute** on the DualSense for 3 seconds | Back to the menu |
 
@@ -58,6 +56,7 @@ In the menus, **Back** on the remote (or **Circle**) always takes you one step b
 
 - **Picture stutters?** Open the console's **Settings** in the app and lower the bitrate, or use a wired connection.
 - **Vibration, triggers or lightbar not working over Bluetooth?** These need a rooted TV. Over USB they work on any TV.
+- **Settings not kept right after installing?** On a TV without root, restart the TV once after the first install.
 - **Coming from chiaki-lg?** Install Chiaki-webOS and open it once: your consoles and settings are copied over. Then remove the old app.
 
 Something not working? [Open an issue](../../issues) with your TV model and webOS version.

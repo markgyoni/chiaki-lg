@@ -1448,9 +1448,9 @@ int main(int argc, char *argv[])
     InputContext *input_ctx = input_init(&input_opt);
 
     // ── Launcher ↔ stream loop ────────────────────────────────────────────────
-    // The launcher comes back after a stream when the user leaves it with
-    // Down-Down on the remote (or Back while connecting).  Back during the
-    // stream, Home, SIGTERM or a PS5-side quit still close the app.
+    // The launcher comes back after a stream when the user leaves it (Back or
+    // Down on the remote, then confirm; holding Mute).  Home, SIGTERM or a
+    // PS5-side quit close the app.
     bool ss4s_ready = false;
     while (!g_should_exit)
     {
@@ -1598,7 +1598,7 @@ int main(int argc, char *argv[])
         info.enable_dualsense = cfg.ps5;
 
         // ── Session / reconnect loop ──────────────────────────────────────────
-        // Stay here until the user leaves (Back, Home, Down-Down, SIGTERM) or
+        // Stay here until the user leaves (Back, Home, Down, SIGTERM) or
         // the PS5 ends the session; transient network errors are retried.
         int attempt = 0;
         while (keys_ok && !g_should_exit && !g_return_to_menu)
@@ -1671,8 +1671,8 @@ int main(int argc, char *argv[])
             // ── Per-session event loop ────────────────────────────────────────
             SDL_Event ev;
             uint32_t stream_start_ms = 0;   // first video frame → startup hint
-            uint32_t last_down_ms = 0;      // Down-Down → back to the menu
-            bool user_left = false;         // left deliberately (Back, Down-Down, holding Mute)
+            int rest_choice = -1;           // answered in the leave prompt (rest mode "Ask")
+            bool user_left = false;         // left deliberately (Back/Down + confirm, holding Mute)
             g_loading_text = "Starting stream";
 
             while (!g_session_ended && !g_should_exit)
@@ -1688,16 +1688,32 @@ int main(int argc, char *argv[])
                         g_session_ended = true;
                         break;
                     }
-                    // TV remote Back (not forwarded to the PS5) goes back to
-                    // the start screen, like Down twice.  Once the video runs
-                    // that counts as leaving (rest mode setting applies).
-                    // Gamepads are read in input.c's evdev thread (EVIOCGRAB),
-                    // never here.
-                    if (ev.type == SDL_KEYDOWN && is_remote_back(&ev))
+                    // TV remote Back or Down (never forwarded to the PS5): while
+                    // the stream is starting it cancels back to the menu; once
+                    // the video runs it asks "Leave the game?", so a stray press
+                    // doesn't end the game.  Gamepads are read in input.c's evdev
+                    // thread (EVIOCGRAB), never here.
+                    if (ev.type == SDL_KEYDOWN && !ev.key.repeat &&
+                        (is_remote_back(&ev) || ev.key.keysym.sym == SDLK_DOWN ||
+                         (int)ev.key.keysym.sym == 1073741905 /* WEBOS_KEY_DOWN */))
                     {
-                        app_log_always("[APP] Remote Back — back to the menu\n");
+                        if (!g_have_video_frame) {
+                            app_log_always("[APP] Back/Down while starting — returning to the menu\n");
+                            g_return_to_menu = true;
+                            g_session_ended = true;
+                            break;
+                        }
+                        input_set_session(input_ctx, NULL);      // the dialog gets the gamepads
+                        UILeaveChoice c = ui_ask_leave(g_renderer, input_ctx,
+                                                       cfg.sleep_on_exit == SLEEP_ASK, &g_session_ended);
+                        if (c == UI_LEAVE_STAY) {
+                            if (!g_session_ended) input_set_session(input_ctx, &g_session);
+                            continue;
+                        }
+                        app_log_always("[APP] Left the game — back to the menu\n");
+                        rest_choice = c == UI_LEAVE_REST;
                         g_return_to_menu = true;
-                        user_left = g_have_video_frame;
+                        user_left = true;
                         g_session_ended = true;
                         break;
                     }
@@ -1706,21 +1722,6 @@ int main(int argc, char *argv[])
                         SDL_Keycode k = ev.key.keysym.sym;
                         bool is_up   = (k == SDLK_UP   || (int)k == 1073741906);   // WEBOS_KEY_UP
                         bool is_down = (k == SDLK_DOWN || (int)k == 1073741905);   // WEBOS_KEY_DOWN
-
-                        // Down twice within 700 ms → leave the stream, back to the launcher.
-                        if (is_down && ev.type == SDL_KEYDOWN && !ev.key.repeat)
-                        {
-                            uint32_t now = SDL_GetTicks();
-                            if (last_down_ms && now - last_down_ms <= 700)
-                            {
-                                app_log_always("[APP] Remote Down-Down — back to the menu\n");
-                                g_return_to_menu = true;
-                                user_left = g_have_video_frame;
-                                g_session_ended  = true;
-                                break;
-                            }
-                            last_down_ms = now;
-                        }
 
                         // Remote navigation never reaches the PS5; only the
                         // gamepad controls the console.  Up toggles the stats
@@ -1835,7 +1836,7 @@ int main(int argc, char *argv[])
                             float opacity = 1.0f;
                             if (elapsed > hint_duration_ms - fade_ms)
                                 opacity = (float)(hint_duration_ms - elapsed) / (float)fade_ms;
-                            ui_render_hint(g_renderer, "Stats: Up or Mute     Back to menu: Down twice or hold Mute",
+                            ui_render_hint(g_renderer, "Stats: Up or Mute     Leave: Back or Down",
                                            opacity);
                         }
                     }
@@ -1850,7 +1851,7 @@ int main(int argc, char *argv[])
             // they drive the rest-mode prompt instead.
             input_set_session(input_ctx, NULL);
 
-            // Rest mode: "On" when the user leaves the stream (Back, Down twice,
+            // Rest mode: "On" when the user leaves the stream (Back or Down,
             // holding Mute) or the app is closed (Home); "Ask" shows a prompt
             // when the user leaves.  Never when the console itself went to sleep
             // or the session already ended on its side.
@@ -1860,7 +1861,7 @@ int main(int argc, char *argv[])
                 if (cfg.sleep_on_exit == SLEEP_ON && (user_left || g_should_exit))
                     rest = true;
                 else if (cfg.sleep_on_exit == SLEEP_ASK && user_left)
-                    rest = ui_ask_rest_mode(g_renderer, input_ctx);
+                    rest = rest_choice >= 0 ? rest_choice == 1 : ui_ask_rest_mode(g_renderer, input_ctx);
                 if (rest)
                 {
                     app_log_always("[APP] Sending the console to rest mode\n");

@@ -24,6 +24,14 @@ void ui_set_launcher_notice(const char *text);
  * rest mode; Back or Home keeps it on. */
 bool ui_ask_rest_mode(SDL_Renderer *renderer, struct InputContext *input);
 
+/* Over the running stream: "Leave the game?"  offer_rest adds "Leave + rest
+ * mode" (rest mode setting "Ask").  Returns UI_LEAVE_STAY if *abort_flag
+ * becomes true (the session ended meanwhile).  Detach the gamepads from the
+ * session first, or the presses also reach the console. */
+typedef enum { UI_LEAVE_STAY = 0, UI_LEAVE = 1, UI_LEAVE_REST = 2 } UILeaveChoice;
+UILeaveChoice ui_ask_leave(SDL_Renderer *renderer, struct InputContext *input, bool offer_rest,
+                           volatile bool *abort_flag);
+
 /* Start screen: the console list (connect, add, settings per console, remove),
  * app settings and the controller test.  On UI_RESULT_CONNECT the chosen console
  * is the active one in cfg (config_select_console). */

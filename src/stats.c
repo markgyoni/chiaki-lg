@@ -1,12 +1,13 @@
 #include "stats.h"
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
 #include <chiaki/session.h> // for CHIAKI_CODEC_* constants
 
 #ifdef HAVE_NDL_DIRECTMEDIA
-#include "NDL_directmedia.h"
+#include <dlfcn.h>
 #endif
 
 StreamStatsCounters g_stream_stats;
@@ -71,9 +72,18 @@ static const char *codec_to_str(int codec)
 static int query_video_render_buf_frames(void)
 {
 #ifdef HAVE_NDL_DIRECTMEDIA
+    /* Looked up at run time: webOS 4's NDL lacks this call, and linking it
+     * directly would end the app the first time the stats are shown. */
+    static int (*get_len)(int *);
+    static bool looked_up;
+    if(!looked_up) {
+        looked_up = true;
+        void *h = dlopen("libNDL_directmedia.so.1", RTLD_LAZY | RTLD_NOLOAD);
+        if(!h) h = dlopen("libNDL_directmedia.so.1", RTLD_LAZY);
+        if(h) get_len = (int (*)(int *))dlsym(h, "NDL_DirectVideoGetRenderBufferLength");
+    }
     int len = -1;
-    int rc = NDL_DirectVideoGetRenderBufferLength(&len);
-    if(rc != 0 || len < 0)
+    if(!get_len || get_len(&len) != 0 || len < 0)
         return -1;
     return len;
 #else

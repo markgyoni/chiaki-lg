@@ -217,14 +217,11 @@ target_link_libraries(chiaki-webos PRIVATE
     m pthread dl ${LIBATOMIC}
 )
 
-# Enable optional NDL queries for stats overlay (buffer-latency estimate)
+# Optional NDL query for the stats overlay (buffer-latency estimate). The
+# library is opened at run time (stats.c), not linked, so firmware without
+# that call still starts.
 if(CMAKE_CROSSCOMPILING OR WEBOS_BUILD)
     target_compile_definitions(chiaki-webos PRIVATE HAVE_NDL_DIRECTMEDIA=1)
-    if(DEFINED NDL_DIRECTMEDIA_LIBRARIES)
-        target_link_libraries(chiaki-webos PRIVATE ${NDL_DIRECTMEDIA_LIBRARIES})
-    else()
-        target_link_libraries(chiaki-webos PRIVATE NDL_directmedia)
-    endif()
 endif()
 
 target_link_options(chiaki-webos PRIVATE

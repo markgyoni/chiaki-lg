@@ -986,3 +986,64 @@ bool ui_ask_rest_mode(SDL_Renderer *r, struct InputContext *input)
     app_log_always("[UI] rest mode prompt: %s\n", answer ? "rest mode" : "keep on");
     return answer == 1;
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * "Leave the game?" — over the running stream (Back or Down on the remote)
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+UILeaveChoice ui_ask_leave(SDL_Renderer *r, struct InputContext *input, bool offer_rest,
+                           volatile bool *abort_flag)
+{
+    if (!r) return UI_LEAVE_STAY;
+    ui_text_init(r);
+    static const char *LABELS[] = { "Keep playing", "Leave", "Leave + rest mode" };
+    const int n = offer_rest ? 3 : 2;
+    int focus = 0;                             /* "Keep playing": a stray press changes nothing */
+    int answer = -1;
+    SDL_Event ev;
+    while (SDL_PollEvent(&ev)) { }
+    ui_pointer_reset();
+
+    while (answer < 0) {
+        if (abort_flag && *abort_flag) { answer = UI_LEAVE_STAY; break; }
+        pad_nav_poll(input);
+        while (SDL_PollEvent(&ev)) {
+            if (ev.type == SDL_QUIT) { answer = UI_LEAVE; break; }
+            SDL_Keycode k = ui_menu_key(&ev);
+            int hv = ui_pointer_hover();
+            if (hv >= 0 && hv < n) focus = hv;
+            if (k == SDLK_LEFT && focus > 0) focus--;
+            if (k == SDLK_RIGHT && focus < n - 1) focus++;
+            if (k == SDLK_RETURN || k == SDLK_KP_ENTER) { answer = focus; break; }
+            if (ui_is_back_key(k)) { answer = UI_LEAVE_STAY; break; }
+        }
+        ui_hit_begin();
+
+        /* clear to transparent, then dim the (still running) video */
+        SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
+        set_color(r, 0x00, 0x00, 0x00, 0xa0);
+        fill_rect(r, 0, 0, SCREEN_W, SCREEN_H);
+        SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+
+        const int W = 340, H = 104, GAP = 32;
+        const int BW = n * W + (n - 1) * GAP + 120, BH = 300;
+        const int BX = (SCREEN_W - BW) / 2, BY = (SCREEN_H - BH) / 2;
+        set_color(r, COL_PANEL);
+        fill_rounded_rect(r, BX, BY, BW, BH, 24);
+        set_color(r, COL_BORDER);
+        stroke_rounded_rect(r, BX, BY, BW, BH, 24);
+        ui_text_draw(r, SCREEN_W / 2, BY + 50, "Leave the game?", 44, UI_FONT_BOLD,
+                     C(COL_TEXT), UI_ALIGN_CENTER);
+        const int Y = BY + BH - H - 44;
+        for (int i = 0; i < n; i++) {
+            int x = BX + 60 + i * (W + GAP);
+            big_button(r, x, Y, W, H, LABELS[i], focus == i, true, false);
+            ui_hit_add(i, x, Y, W, H);
+        }
+        SDL_RenderPresent(r);
+        SDL_Delay(16);
+    }
+    while (SDL_PollEvent(&ev)) { }
+    app_log_always("[UI] leave prompt: %s\n", LABELS[answer]);
+    return (UILeaveChoice)answer;
+}
