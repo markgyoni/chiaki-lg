@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Chiaki-lg is a native C port of [chiaki-ng](https://github.com/streetpea/chiaki-ng) (PS4/PS5 Remote Play) for LG webOS TVs. This repo contains only the app layer (`src/`, ~5k lines of C11); the Remote Play protocol comes from `libchiaki`, built from a separate chiaki-ng checkout. App ID is `org.homebrew.chiaki`. License AGPL-3.0.
+Chiaki-webOS (formerly chiaki-lg, renamed in 0.9.0) is a native C port of [chiaki-ng](https://github.com/streetpea/chiaki-ng) (PS4/PS5 Remote Play) for LG webOS TVs. This repo contains only the app layer (`src/`, ~5k lines of C11); the Remote Play protocol comes from `libchiaki`, built from a separate chiaki-ng checkout. App ID is `org.homebrew.chiaki`. License AGPL-3.0-only with the OpenSSL exception (LICENSE, same as chiaki-ng).
 
 ## Build
 
@@ -26,7 +26,7 @@ Host gotchas seen on Debian 13 WSL with buildroot-nc4 `webos-a38c582`: the SDK's
 
 ## Versioning
 
-The version lives only in `packaging/appinfo.json` (`version`). CMake embeds it plus the git revision (`$CHIAKI_LG_GIT` from the WSL build wrapper, else `git describe --always --dirty`) as `APP_VERSION`/`APP_GIT`; the launcher header shows `vX.Y.Z (rev)` and the log starts with `[APP] chiaki-lg vX.Y.Z (rev)`. Scheme: `0.MINOR.PATCH` — bump MINOR when a ROADMAP stage is completed, PATCH for fixes in between; tag releases `vX.Y.Z`.
+The version lives only in `packaging/appinfo.json` (`version`). CMake embeds it plus the git revision (`$CHIAKI_WEBOS_GIT`, or the older `$CHIAKI_LG_GIT`, from the WSL build wrapper, else `git describe --always --dirty`) as `APP_VERSION`/`APP_GIT`; the launcher header shows `vX.Y.Z (rev)` and the log starts with `[APP] Chiaki-webOS vX.Y.Z (rev)`. Scheme: `0.MINOR.PATCH` — bump MINOR when a ROADMAP stage is completed, PATCH for fixes in between; tag releases `vX.Y.Z`.
 
 ## Dev loop on a rooted TV
 

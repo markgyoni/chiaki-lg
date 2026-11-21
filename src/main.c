@@ -1214,7 +1214,7 @@ int main(int argc, char *argv[])
         char tbuf[64];
         strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S", localtime(&t));
         app_log("\n\n========== NEW LAUNCH %s ==========\n", tbuf);
-        app_log_always("[APP] chiaki-lg v%s (%s)\n", APP_VERSION, APP_GIT);
+        app_log_always("[APP] Chiaki-webOS v%s (%s)\n", APP_VERSION, APP_GIT);
     }
 
     app_log("[APP] SS4S_MODULE=%s\n",      getenv("SS4S_MODULE"));

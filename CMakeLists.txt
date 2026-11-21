@@ -147,12 +147,14 @@ add_executable(chiaki-webos
 
 # ── Version ───────────────────────────────────────────────────────────────────
 # Single source of truth: "version" in packaging/appinfo.json.  The git
-# revision comes from $CHIAKI_LG_GIT (set by the build wrapper, since the WSL
-# build copy has no .git) or from git itself.
+# revision comes from $CHIAKI_WEBOS_GIT (older wrappers: $CHIAKI_LG_GIT), set by
+# the build wrapper since the WSL build copy has no .git, or from git itself.
 file(READ "${CMAKE_SOURCE_DIR}/packaging/appinfo.json" _appinfo)
 string(REGEX MATCH "\"version\"[ \t]*:[ \t]*\"([^\"]+)\"" _m "${_appinfo}")
 set(APP_VERSION "${CMAKE_MATCH_1}")
-if(DEFINED ENV{CHIAKI_LG_GIT} AND NOT "$ENV{CHIAKI_LG_GIT}" STREQUAL "")
+if(DEFINED ENV{CHIAKI_WEBOS_GIT} AND NOT "$ENV{CHIAKI_WEBOS_GIT}" STREQUAL "")
+    set(APP_GIT "$ENV{CHIAKI_WEBOS_GIT}")
+elseif(DEFINED ENV{CHIAKI_LG_GIT} AND NOT "$ENV{CHIAKI_LG_GIT}" STREQUAL "")
     set(APP_GIT "$ENV{CHIAKI_LG_GIT}")
 else()
     execute_process(COMMAND git describe --always --dirty
@@ -163,7 +165,7 @@ else()
         set(APP_GIT "unknown")
     endif()
 endif()
-message(STATUS "chiaki-lg version ${APP_VERSION} (${APP_GIT})")
+message(STATUS "Chiaki-webOS version ${APP_VERSION} (${APP_GIT})")
 target_compile_definitions(chiaki-webos PRIVATE
     APP_VERSION="${APP_VERSION}" APP_GIT="${APP_GIT}")
 

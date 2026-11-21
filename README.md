@@ -1,6 +1,6 @@
-# Chiaki-lg
+# Chiaki-webOS
 
-A native port of [chiaki-ng](https://github.com/streetpea/chiaki-ng) for LG webOS smart TVs.
+A native port of [chiaki-ng](https://github.com/streetpea/chiaki-ng) for LG webOS smart TVs (formerly *chiaki-lg*).
 Streams PS4/PS5 Remote Play directly to your LG webOS TV.
 
 > **Tested on:** PS5 + webOS 5+. PS4 and webOS 4.x are supported in the code and should work, but have not been directly tested. Please open an issue if you encounter problems on those platforms.
@@ -45,7 +45,7 @@ Or use [WebOS Dev Manager](https://github.com/webosbrew/dev-manager-desktop) if 
 
 ### Step 2 — Add your console
 
-1. Turn on the PS5 or PS4 (fully on, not rest mode) on the same network as the TV, and launch **Chiaki-lg**.
+1. Turn on the PS5 or PS4 (fully on, not rest mode) on the same network as the TV, and launch **Chiaki-webOS**.
 2. Select **+ Add your console**. Consoles on the network are listed; pick yours (or enter its address manually).
 3. The first time, sign in to PlayStation Network: scan the QR code with your phone and sign in. You end up on a page whose address contains `code=v3.XXXXXX`; select **Enter code** on the TV and type the characters after `v3.`. This is needed once for all consoles.
 4. On the console open **Settings → System → Remote Play → Link Device** (PS4: **Settings → Remote Play Connection Settings → Add Device**) and type the 8-digit number into the TV.
@@ -311,8 +311,8 @@ pip3 install nanopb protobuf --break-system-packages
 
 ```bash
 git clone https://github.com/streetpea/chiaki-ng.git
-git clone <this-repo-url> chiaki-lg
-cd chiaki-lg
+git clone <this-repo-url> chiaki-webos
+cd chiaki-webos
 
 export TOOLCHAIN_DIR=~/webos-sdk/arm-webos-linux-gnueabi_sdk-buildroot
 ./build-webos.sh ../chiaki-ng 2>&1 | tee build.log
@@ -376,4 +376,13 @@ The IPK is output to `build-webos/*.ipk`.
 
 ## License
 
-AGPL-3.0 — same as [chiaki-ng](https://github.com/streetpea/chiaki-ng), on which this project is based.
+[AGPL-3.0-only with the OpenSSL exception](LICENSE), the same license as [chiaki-ng](https://github.com/streetpea/chiaki-ng), whose `libchiaki` this app links. Anyone who distributes a build (an `.ipk`) must also offer its complete source code, including changes, under the same license.
+
+## Credits
+
+- [chiaki-ng](https://github.com/streetpea/chiaki-ng) and the original [Chiaki](https://git.sr.ht/~thestr4ng3r/chiaki): the Remote Play protocol (`libchiaki`).
+- [chiaki-lg](https://github.com/TacticalBill/chiaki-lg) by TacticalBill: the first webOS port, which this project started from.
+- [SS4S](https://github.com/mariotaku/ss4s) by mariotaku (from moonlight-tv): webOS hardware audio/video output.
+- [webOS Homebrew](https://www.webosbrew.org/): toolchain and Homebrew Channel.
+
+Chiaki-webOS is not affiliated with Sony Interactive Entertainment or LG Electronics. PlayStation, PS4, PS5 and DualSense are trademarks of Sony Interactive Entertainment.

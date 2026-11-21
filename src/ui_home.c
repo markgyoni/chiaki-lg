@@ -969,7 +969,7 @@ UIResult ui_run_home(SDL_Renderer *r, AppConfig *cfg, const char *config_path,
         if (quit) { result = UI_RESULT_QUIT; break; }           /* Home button: leave at once */
         if (ui_is_back_key(k)) {
             /* the only screen where Back leaves the app: ask first */
-            if (confirm(r, in, "Exit Chiaki-lg?", "", "Exit", "Stay")) { result = UI_RESULT_QUIT; break; }
+            if (confirm(r, in, "Exit Chiaki-webOS?", "", "Exit", "Stay")) { result = UI_RESULT_QUIT; break; }
             drain_events();
             continue;
         }
@@ -1031,8 +1031,8 @@ UIResult ui_run_home(SDL_Renderer *r, AppConfig *cfg, const char *config_path,
         fill_rect(r, 0, 0, SCREEN_W, SCREEN_H);
         set_color(r, COL_ACCENT);
         fill_rect(r, 0, 0, SCREEN_W, 6);
-        ui_text_draw(r, M, 28, "Chiaki-lg", 60, UI_FONT_BOLD, C(COL_TEXT), UI_ALIGN_LEFT);
-        ui_text_draw(r, M + ui_text_width("Chiaki-lg", 60, UI_FONT_BOLD) + 28, 50,
+        ui_text_draw(r, M, 28, "Chiaki-webOS", 60, UI_FONT_BOLD, C(COL_TEXT), UI_ALIGN_LEFT);
+        ui_text_draw(r, M + ui_text_width("Chiaki-webOS", 60, UI_FONT_BOLD) + 28, 50,
                      "PlayStation Remote Play for LG TVs", 32, UI_FONT_REGULAR, C(COL_TEXT_DIM), UI_ALIGN_LEFT);
         ui_text_draw(r, SCREEN_W - M, 50, "v" APP_VERSION " (" APP_GIT ")", 24, UI_FONT_REGULAR,
                      C(COL_TEXT_FAINT), UI_ALIGN_RIGHT);

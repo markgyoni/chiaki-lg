@@ -704,7 +704,7 @@ void ui_render_loading(SDL_Renderer *r, const char *base_text)
 
     /* App branding in top-left */
     set_color(r, COL_TEXT_FAINT);
-    draw_text(r, 40, 30, "CHIAKI", 3);
+    draw_text(r, 40, 30, "CHIAKI-WEBOS", 3);
 
     /* Centre content */
     if (!base_text) base_text = "Loading";
