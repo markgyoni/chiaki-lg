@@ -1011,9 +1011,9 @@ static bool should_reconnect(ChiakiQuitReason reason)
 static const char *volatile g_loading_text = "Connecting";
 static volatile bool g_return_to_menu = false;   // stream → launcher, not app exit
 
-static bool is_remote_back(SDL_Keycode k)
+static bool is_remote_back(const SDL_Event *ev)
 {
-    return k == (SDL_Keycode)1073742094 /* WEBOS_KEY_BACK */ || k == SDLK_ESCAPE;
+    return ui_is_back_event(ev);
 }
 
 // Handle events while a loading screen is up: Home quits the app, Back
@@ -1021,10 +1021,12 @@ static bool is_remote_back(SDL_Keycode k)
 static void loading_poll_events(void)
 {
     SDL_Event ev;
+    ui_pointer_tick();
     while (SDL_PollEvent(&ev)) {
+        ui_pointer_event(&ev);
         if (ev.type == SDL_QUIT) {
             g_should_exit = true;
-        } else if (ev.type == SDL_KEYDOWN && !ev.key.repeat && is_remote_back(ev.key.keysym.sym)) {
+        } else if (ev.type == SDL_KEYDOWN && !ev.key.repeat && is_remote_back(&ev)) {
             app_log_always("[APP] Back during loading — returning to the menu\n");
             g_return_to_menu = true;
         }
@@ -1265,6 +1267,10 @@ int main(int argc, char *argv[])
     // We use direct evdev + EVIOCGRAB for the gamepad (in input.c), so we
     // do NOT need SDL_INIT_GAMECONTROLLER.  The grab at the kernel level
     // prevents webOS from seeing B→Back / A→OK / Guide→Home at all.
+    // Deliver the remote's Back key to the app (else webOS handles it itself):
+    // Back goes back one screen everywhere; only the start screen offers to exit.
+    SDL_SetHint("SDL_WEBOS_ACCESS_POLICY_KEYS_BACK", "true");
+    SDL_SetHint("SDL_WEBOS_CURSOR_SLEEP_TIME", "8000");     // pointer hides after 8 s idle
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0)
     {
         app_log("[APP] SDL_Init failed: %s\n", SDL_GetError());
@@ -1355,7 +1361,8 @@ int main(int argc, char *argv[])
     SDL_RenderClear(g_renderer);
     SDL_RenderPresent(g_renderer);
 
-    SDL_ShowCursor(SDL_DISABLE);
+    // The LG Magic Remote pointer works on every screen (ui_menu_key()); it
+    // hides on a direction key and after 8 s idle (ui_pointer_event/tick).
 
     // ── Stats overlay state (toggled at runtime) ─────────────────────────────
     StatsOverlay stats_overlay;
@@ -1511,10 +1518,11 @@ int main(int argc, char *argv[])
         }
         uint8_t account_id_raw[8];
         decoded_len = sizeof(account_id_raw);
-        if (keys_ok && chiaki_base64_decode(cfg.psn_account_id_b64, strlen(cfg.psn_account_id_b64),
-                                            account_id_raw, &decoded_len) != CHIAKI_ERR_SUCCESS)
+        if (keys_ok && (!cfg.psn_account_id_b64 ||
+                        chiaki_base64_decode(cfg.psn_account_id_b64, strlen(cfg.psn_account_id_b64),
+                                             account_id_raw, &decoded_len) != CHIAKI_ERR_SUCCESS))
         {
-            app_log_always("[APP] Failed to decode psn_account_id\n");
+            app_log_always("[APP] Missing or invalid psn_account_id for this console - link it again\n");
             keys_ok = false;
         }
         memcpy(&info.psn_account_id, account_id_raw, sizeof(info.psn_account_id));
@@ -1613,6 +1621,7 @@ int main(int argc, char *argv[])
             {
                 while (SDL_PollEvent(&ev))
                 {
+                    ui_pointer_event(&ev);
                     if (ev.type == SDL_QUIT)
                     {
                         // SDL_QUIT arrives when the user presses Home on webOS.
@@ -1621,20 +1630,16 @@ int main(int argc, char *argv[])
                         g_session_ended = true;
                         break;
                     }
-                    // TV remote Back (not forwarded to the PS5): while the
-                    // stream is still starting it cancels back to the menu;
-                    // once video runs it exits the app.  Gamepads are read in
-                    // input.c's evdev thread (EVIOCGRAB), never here.
-                    if (ev.type == SDL_KEYDOWN && is_remote_back(ev.key.keysym.sym))
+                    // TV remote Back (not forwarded to the PS5) goes back to
+                    // the start screen, like Down twice.  Once the video runs
+                    // that counts as leaving (rest mode setting applies).
+                    // Gamepads are read in input.c's evdev thread (EVIOCGRAB),
+                    // never here.
+                    if (ev.type == SDL_KEYDOWN && is_remote_back(&ev))
                     {
-                        if (!g_have_video_frame) {
-                            app_log_always("[APP] Back while starting — returning to the menu\n");
-                            g_return_to_menu = true;
-                        } else {
-                            app_log("[APP] Remote Back/Escape — exiting\n");
-                            g_should_exit = true;
-                            user_left = true;
-                        }
+                        app_log_always("[APP] Remote Back — back to the menu\n");
+                        g_return_to_menu = true;
+                        user_left = g_have_video_frame;
                         g_session_ended = true;
                         break;
                     }
@@ -1697,6 +1702,7 @@ int main(int argc, char *argv[])
                         ui_note_pad_activity();
                     last_buttons = pst.buttons;
                     ui_keep_awake_tick();
+                    ui_pointer_tick();
                 }
 
                 // DualSense mute button: tap → stats overlay, hold 3 s → menu.

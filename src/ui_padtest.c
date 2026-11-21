@@ -11,10 +11,6 @@
 #define W 1920
 #define H 1080
 
-/* TV remote codes seen by SDL on webOS (see ui.c / input.c) */
-#define KEY_BACK 1073742094
-#define KEY_RED  403
-
 #define PS_HOLD_EXIT_MS 2000
 #define RUMBLE_TEST_MS  700
 
@@ -270,6 +266,7 @@ static void draw_tests(SDL_Renderer *r, int focus, bool triggers_on, int light_i
         int x = X0 + i * (BW + GAP);
         if (i == focus) { col(r, C_TEXT); rrect(r, x - 4, Y - 4, BW + 8, BH + 8, 18); }
         col(r, i == focus ? C_ACCENT : C_BODY); rrect(r, x, Y, BW, BH, 14);
+        ui_hit_add(i, x, Y, BW, BH);
         text(r, x + BW / 2, Y + (BH - ui_text_line_height(32)) / 2, lbl[i], 32, UI_FONT_SEMIBOLD,
              C_TEXT, UI_ALIGN_CENTER);
     }
@@ -285,14 +282,17 @@ void ui_run_padtest(SDL_Renderer *r, struct InputContext *in)
     bool triggers_on = false;
     Uint32 rumble_until = 0, ps_since = 0;
 
+    ui_pointer_reset();
     for (;;) {
         SDL_Event ev;
         bool exit = false;
         while (SDL_PollEvent(&ev)) {
             if (ev.type == SDL_QUIT) { exit = true; break; }
-            if (ev.type != SDL_KEYDOWN) continue;
-            SDL_Keycode k = ev.key.keysym.sym;
-            if (k == SDLK_ESCAPE || k == KEY_BACK || k == KEY_RED) { exit = true; break; }
+            SDL_Keycode k = ui_menu_key(&ev);
+            int hv = ui_pointer_hover();
+            if (hv >= 0 && hv < T_COUNT) focus = hv;
+            if (!k) continue;
+            if (ui_is_back_key(k)) { exit = true; break; }
             if (k == SDLK_LEFT  && focus > 0)           focus--;
             if (k == SDLK_RIGHT && focus < T_COUNT - 1) focus++;
             if (k == SDLK_RETURN || k == SDLK_KP_ENTER) {
@@ -321,6 +321,7 @@ void ui_run_padtest(SDL_Renderer *r, struct InputContext *in)
                 ui_note_pad_activity();
             last = st;
             ui_keep_awake_tick();
+            ui_pointer_tick();
         }
         Uint32 now = SDL_GetTicks();
         if (rumble_until && (Sint32)(now - rumble_until) >= 0) { input_set_rumble(in, 0, 0); rumble_until = 0; }
@@ -332,6 +333,7 @@ void ui_run_padtest(SDL_Renderer *r, struct InputContext *in)
         }
         if (exit) break;
 
+        ui_hit_begin();
         SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
         col(r, C_BG); rect(r, 0, 0, W, H);
         SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
@@ -342,7 +344,7 @@ void ui_run_padtest(SDL_Renderer *r, struct InputContext *in)
         draw_info(r, in, &st);
         draw_tests(r, focus, triggers_on, light_idx, player);
         text(r, W / 2, 1000, ps_since ? "Keep holding PS to exit..."
-                                      : "Remote: Left/Right choose a test, OK runs it, Back exits.   "
+                                      : "Remote: Left/Right or the pointer choose a test, OK runs it, Back exits.   "
                                         "Controller: hold PS for 2 s to exit.",
              26, UI_FONT_REGULAR, ps_since ? C_WARN : C_DIM, UI_ALIGN_CENTER);
         SDL_RenderPresent(r);

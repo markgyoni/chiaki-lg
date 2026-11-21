@@ -1418,7 +1418,7 @@ void input_fini(InputContext *ctx)
 // ── TV remote handler (SDL keyboard events only) ───────────────────────────────
 // Gamepad events are handled entirely in evdev_reader() above.
 // This function only processes SDL_KEYDOWN/KEYUP from the TV remote.
-// WEBOS_KEY_BACK is intentionally absent — it exits the app (handled in main.c).
+// Back is intentionally absent — it leaves the stream (handled in main.c).
 void input_handle_event(SDL_Event *ev, InputContext *ctx, ChiakiSession *session)
 {
     if (!ctx) return;

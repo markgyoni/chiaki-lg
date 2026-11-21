@@ -82,30 +82,22 @@ static json_object *request(const char *url, const char *post, long *http, char 
     return j;
 }
 
-/* "v3.AbCdEf", "AbCdEf" or a whole redirect URL containing code=... */
+/* "AbCdEf", "v3.AbCdEf" or a whole redirect URL containing code=...
+ * The code is used exactly as Sony put it in the address (chiaki-ng does the
+ * same); current codes have no "v3." prefix. */
 static void extract_code(const char *in, char *out, size_t outlen)
 {
     const char *p = strstr(in, "code=");
     p = p ? p + 5 : in;
     while (*p == ' ') p++;
-    size_t n = strcspn(p, "& \r\n");
-    char tmp[128];
-    if (n >= sizeof(tmp)) n = sizeof(tmp) - 1;
-    memcpy(tmp, p, n); tmp[n] = '\0';
-    if (strncmp(tmp, "v3.", 3) == 0 || strchr(tmp, '.'))
-        snprintf(out, outlen, "%s", tmp);
-    else
-        snprintf(out, outlen, "v3.%s", tmp);
+    size_t n = strcspn(p, "&# \r\n");
+    if (n >= outlen) n = outlen - 1;
+    memcpy(out, p, n);
+    out[n] = '\0';
 }
 
-bool psn_login_with_code(const char *code_or_url, char **account_id_b64, char **refresh_token,
-                         char *err, size_t errlen)
+static json_object *exchange_code(const char *code, long *http, char *err, size_t errlen)
 {
-    *account_id_b64 = NULL;
-    *refresh_token = NULL;
-    char code[128];
-    extract_code(code_or_url, code, sizeof(code));
-
     CURL *esc = curl_easy_init();
     char *ecode = curl_easy_escape(esc, code, 0);
     char *escope = curl_easy_escape(esc, SCOPE, 0);
@@ -116,11 +108,38 @@ bool psn_login_with_code(const char *code_or_url, char **account_id_b64, char **
     curl_free(ecode); curl_free(escope); curl_free(eredir);
     curl_easy_cleanup(esc);
 
+    return request(TOKEN_URL, body, http, err, errlen);
+}
+
+bool psn_login_with_code(const char *code_or_url, char **account_id_b64, char **online_id,
+                         char **refresh_token, char *err, size_t errlen)
+{
+    *account_id_b64 = NULL;
+    *online_id = NULL;
+    *refresh_token = NULL;
+    char code[128];
+    extract_code(code_or_url, code, sizeof(code));
+    if (!code[0]) { snprintf(err, errlen, "no code entered"); return false; }
+
     long http = 0;
-    json_object *tok = request(TOKEN_URL, body, &http, err, errlen);
+    json_object *tok = exchange_code(code, &http, err, errlen);
+    if (http == 400 && strncmp(code, "v3.", 3) != 0) {
+        /* older sign-ins put "code=v3.XXXX" in the address; maybe "v3." was left out */
+        char v3[136];
+        snprintf(v3, sizeof(v3), "v3.%s", code);
+        long http2 = 0;
+        json_object *tok2 = exchange_code(v3, &http2, err, errlen);
+        if (http2 == 200) {
+            if (tok) json_object_put(tok);
+            tok = tok2;
+            http = http2;
+        } else if (tok2) {
+            json_object_put(tok2);
+        }
+    }
     if (!tok || http != 200) {
         if (tok) json_object_put(tok);
-        if (http) snprintf(err, errlen, "sign-in code not accepted (HTTP %ld) - codes expire after a few minutes", http);
+        if (http) snprintf(err, errlen, "sign-in code not accepted (HTTP %ld) - each code works once and expires after a few minutes", http);
         return false;
     }
     json_object *v;
@@ -157,7 +176,10 @@ bool psn_login_with_code(const char *code_or_url, char **account_id_b64, char **
     }
     *account_id_b64 = strdup(b64);
     if (refresh) *refresh_token = strdup(refresh);
-    app_log_always("[PSN] signed in: account ID %s, refresh token %s\n", b64, refresh ? "received" : "missing");
+    const char *oid = json_object_object_get_ex(info, "online_id", &v) ? json_object_get_string(v) : NULL;
+    if (oid && oid[0]) *online_id = strdup(oid);
+    app_log_always("[PSN] signed in: %s, account ID %s, refresh token %s\n", oid ? oid : "(no online ID)",
+                   b64, refresh ? "received" : "missing");
     json_object_put(info);
     json_object_put(tok);
     return true;

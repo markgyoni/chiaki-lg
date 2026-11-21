@@ -15,7 +15,7 @@ Streams PS4/PS5 Remote Play directly to your LG webOS TV.
 - **1080p60 streaming** with H.265, H.265 HDR, or H.264 video codecs
 - **Hardware video decode** via webOS NDL (direct media pipeline) — video is decoded on a dedicated hardware plane below the app surface, not software-rendered
 - **Native Opus audio passthrough** — raw Opus packets fed directly to webOS NDL hardware decoder (no software decode step)
-- **Console manager** — finds PS5/PS4 consoles on the network, links them with the console's PIN (PSN sign-in via a QR code on your phone, once), and keeps several consoles with their own stream settings
+- **Console manager** — finds PS5/PS4 consoles on the network, links them with the console's PIN (PSN sign-in via a QR code on your phone), and keeps several consoles with their own stream settings and PSN account (signed-in accounts are remembered and offered when you add the next console)
 - **Full gamepad support** — DualSense (touchpad, motion, vibration, adaptive triggers, lightbar), Xbox Wireless Controller (with rumble), DualShock 4 and other Bluetooth/USB gamepads via direct evdev with exclusive grab (`EVIOCGRAB`); see [Gamepad support](#gamepad-support)
 - **Controller test screen** — see live what the PS5 receives and test vibration, triggers and lightbar
 - **Wake-on-LAN** — wakes PS5 from rest mode before connecting (UDP broadcast + unicast)
@@ -56,7 +56,7 @@ The console appears on the start screen. Add more consoles the same way.
 
 Select a console and press OK to connect. Each console has **Settings** (name, address, resolution, frame rate, bitrate, codec, wake on connect, rest mode on exit, link again, remove) and **Remove**. **App settings** holds the controller, stream overlay and logging options; **Controller test** checks every button, the touchpad, motion and the controller outputs.
 
-The menus work with the TV remote or a gamepad (D-pad/left stick to move, Cross to select, Circle to go back). Configs from older versions (one console, imported from chiaki-ng) are moved into the console list automatically.
+The menus work with the TV remote, the LG Magic Remote pointer (point and click) or a gamepad (D-pad/left stick to move, Cross to select, Circle to go back). Back on the remote (or Circle) goes back one screen everywhere; only on the start screen does it offer to exit the app. Text is typed with the TV's own on-screen keyboard. Configs from older versions (one console, imported from chiaki-ng) are moved into the console list automatically.
 
 ---
 
@@ -88,12 +88,14 @@ Everything is managed in the app; you can also edit the file over SSH or WebOS D
             "video_bitrate": 15000,
             "video_codec": "h265",
             "wakeup": true,
-            "sleep_on_exit": "ask"
+            "sleep_on_exit": "ask",
+            "psn_account_id": "…"
         }
     ],
     "last_console": 0,
-    "psn_account_id": "…",
-    "psn_refresh_token": "…",
+    "psn_accounts": [
+        { "name": "online-id", "account_id": "…", "refresh_token": "…" }
+    ],
     "stats_corner": "top-left",
     "log_level": "warning"
 }
@@ -116,14 +118,14 @@ Per console (`consoles[]`, up to 8):
 | `video_codec` | string | `"h265"` | `"h265"`, `"h265_hdr"` or `"h264"` (PS4 always uses H.264) |
 | `wakeup` | bool | `true` | Wake the console when connecting |
 | `sleep_on_exit` | string | `"ask"` | Rest mode when you leave a stream: `"off"`, `"on"` or `"ask"` (a prompt when leaving with Back, Down twice or holding Mute) |
+| `psn_account_id` | string | from linking | PSN account ID (base64) the console is linked with; its `psn_accounts` entry supplies the cloud wakeup token |
 
 App-wide:
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `last_console` | int | `0` | Console selected on the start screen |
-| `psn_account_id` | string | from sign-in | PSN account ID (base64), needed to link consoles |
-| `psn_refresh_token` | string | from sign-in | PSN token for cloud wakeup (see below) |
+| `psn_accounts` | array | from sign-in | Signed-in PSN accounts (up to 8): `name` (online ID), `account_id` (base64), `refresh_token` (cloud wakeup, see below). Managed in App settings → PSN accounts. Configs from before 0.8 with a top-level `psn_account_id` / `psn_refresh_token` are migrated on load. |
 | `audio_volume` | int | `100` | Audio volume (0–100) |
 | `wakeup_delay_ms` | int | `60000` | Max time (ms) to wait for a console to wake |
 | `stats_corner` | string | `"top-left"` | Stats overlay corner: `"top-left"`, `"top-right"`, `"bottom-left"`, `"bottom-right"` |
@@ -139,7 +141,7 @@ App-wide:
 
 ### PSN cloud wakeup (optional)
 
-When the console ignores local wakeup packets, the app wakes it through PSN. The sign-in done when you add a console stores the token for this, so there is nothing extra to set up. Also enable **PS5 Settings → System → Power Saving → Features Available in Rest Mode → Enable Turning On PS5 from Network**.
+When the console ignores local wakeup packets, the app wakes it through PSN. The sign-in done when you add a console stores the token for this (per PSN account), so there is nothing extra to set up. Also enable **PS5 Settings → System → Power Saving → Features Available in Rest Mode → Enable Turning On PS5 from Network**.
 
 ---
 
@@ -184,7 +186,7 @@ The TV remote is not forwarded to the PS5 as controller input. During streaming 
 |---|---|
 | **Up** | Toggle stats overlay |
 | **Down** twice (within 0.7 s) | Leave the stream and go back to the menu |
-| **Back** | Exit the app (while the stream is still connecting: cancel and go back to the menu) |
+| **Back** | Leave the stream and go back to the menu (while connecting: cancel) |
 | **Home** | Exit the app |
 
 On a DualSense (raw HID backend), the **Mute** button is not sent to the console:
@@ -242,7 +244,7 @@ Likely a codec or NDL issue. Check logs. Try `"video_codec": "h264"` as a fallba
 Check `/tmp/chiaki.log` for the `[AUTO]` line confirming which SS4S module was selected. If auto-detection chose `ndl-webos5` incorrectly, set `"ss4s_module": "ndl-webos4"` in `config.json` manually.
 
 **PS5 won't wake from rest mode**
-Add your `psn_refresh_token` to `config.json` to enable PSN cloud wakeup (see above).
+Check that the console's PSN account is still signed in (App settings → PSN accounts); its token enables PSN cloud wakeup (see above).
 
 **Gamepad buttons intercepted by webOS**
 Check logs for `EVIOCGRAB FAILED`. Disconnect and reconnect the controller after launching the app.

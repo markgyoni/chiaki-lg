@@ -86,5 +86,8 @@ void ui_draw_help_footer(SDL_Renderer *r, const char *help, const char *keys, co
 void pad_nav_poll(struct InputContext *in);
 const char *on_off(bool v);
 bool ui_is_back_key(SDL_Keycode k);
-/* PSN sign-in screen (QR code + code entry); stores the account in cfg (ui_home.c). */
-bool ui_psn_sign_in(SDL_Renderer *r, struct InputContext *in, AppConfig *cfg, const char *config_path);
+/* PSN sign-in screen (QR code + code entry); adds the account to cfg and
+ * returns its index, -1 if cancelled (ui_home.c). */
+int  ui_psn_sign_in(SDL_Renderer *r, struct InputContext *in, AppConfig *cfg, const char *config_path);
+/* Signed-in PSN accounts: list, sign out, sign in (ui_home.c). */
+void ui_psn_accounts(SDL_Renderer *r, struct InputContext *in, AppConfig *cfg, const char *config_path);

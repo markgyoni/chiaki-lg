@@ -11,6 +11,7 @@
 #include "app_log.h"
 #include "third_party/qrcodegen.h"
 
+
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <pthread.h>
@@ -35,7 +36,8 @@ static bool valid_ipv4(const char *s)
 
 static bool console_registered(const ConsoleConfig *c)
 {
-    return c->registered_key_b64 && c->registered_key_b64[0] && c->rp_key_b64 && c->rp_key_b64[0];
+    return c->registered_key_b64 && c->registered_key_b64[0] && c->rp_key_b64 && c->rp_key_b64[0] &&
+           c->psn_account_id_b64 && c->psn_account_id_b64[0];
 }
 
 static void drain_events(void)
@@ -44,16 +46,20 @@ static void drain_events(void)
     SDL_PumpEvents();
     SDL_Event e;
     while (SDL_PollEvent(&e)) {}
+    ui_pointer_reset();
 }
 
-/* Next key from the remote or a gamepad (arrows/OK/Back), 0 if none. */
+/* Next key from the remote, a gamepad or the Magic Remote pointer
+ * (arrows/OK/Back; Back is always SDLK_ESCAPE), 0 if none.  Pointer moves
+ * are picked up by the caller with ui_pointer_hover(). */
 static SDL_Keycode poll_key(struct InputContext *in, bool *quit)
 {
     pad_nav_poll(in);
     SDL_Event ev;
     while (SDL_PollEvent(&ev)) {
         if (ev.type == SDL_QUIT) { if (quit) *quit = true; return SDLK_ESCAPE; }
-        if (ev.type == SDL_KEYDOWN) return ev.key.keysym.sym;
+        SDL_Keycode k = ui_menu_key(&ev);
+        if (k) return k;
     }
     return 0;
 }
@@ -95,11 +101,14 @@ static bool confirm(SDL_Renderer *r, struct InputContext *in, const char *questi
     for (;;) {
         bool quit = false;
         SDL_Keycode k = poll_key(in, &quit);
+        int hv = ui_pointer_hover();
+        if (hv == 0 || hv == 1) focus = hv;
         if (quit || ui_is_back_key(k)) return false;
         if (k == SDLK_LEFT) focus = 0;
         if (k == SDLK_RIGHT) focus = 1;
         if (is_ok(k)) { drain_events(); return focus == 0; }
 
+        ui_hit_begin();
         set_color(r, COL_BG);
         fill_rect(r, 0, 0, SCREEN_W, SCREEN_H);
         const int BW = 1000, BH = 400, BX = (SCREEN_W - BW) / 2, BY = (SCREEN_H - BH) / 2;
@@ -111,6 +120,8 @@ static bool confirm(SDL_Renderer *r, struct InputContext *in, const char *questi
         const int W = 360, H = 100, Y = BY + BH - H - 44, X0 = SCREEN_W / 2 - W - 20;
         big_button(r, X0, Y, W, H, yes, focus == 0, true, false);
         big_button(r, X0 + W + 40, Y, W, H, no, focus == 1, true, false);
+        ui_hit_add(0, X0, Y, W, H);
+        ui_hit_add(1, X0 + W + 40, Y, W, H);
         SDL_RenderPresent(r);
         SDL_Delay(16);
     }
@@ -118,107 +129,152 @@ static bool confirm(SDL_Renderer *r, struct InputContext *in, const char *questi
 
 /* ── text / number entry ───────────────────────────────────────────────────── */
 
-/* On-screen keyboard.  digits_only: 0-9 (and '.' if allow_dot) for addresses
- * and PINs.  Returns false on Back. */
+/* Text entry with the TV's own on-screen keyboard: SDL_StartTextInput()
+ * makes webOS show its virtual keyboard, typed text arrives as SDL_TEXTINPUT.
+ * digits_only keeps 0-9 (and '.' if allow_dot) for addresses and PINs.
+ * With the keyboard closed: OK on the field opens it again, Done / Cancel
+ * below.  Returns false on Back / Cancel. */
+static bool char_allowed(char ch, bool digits_only, bool allow_dot)
+{
+    if (digits_only) return (ch >= '0' && ch <= '9') || (allow_dot && ch == '.');
+    return ch >= 0x20 && ch < 0x7f;
+}
+
+static void append_text(char *work, size_t max_len, const char *text, bool digits_only, bool allow_dot)
+{
+    for (const char *p = text; *p; p++) {
+        size_t l = strlen(work);
+        if (l >= max_len) break;
+        if (!char_allowed(*p, digits_only, allow_dot)) continue;
+        work[l] = *p;
+        work[l + 1] = '\0';
+    }
+}
+
+static void open_tv_keyboard(const SDL_Rect *field)
+{
+    SDL_StopTextInput();                         /* restart, so the keyboard shows again */
+    SDL_SetTextInputRect((SDL_Rect *)field);
+    SDL_StartTextInput();
+}
+
+/* main.c grabs the app window; while typing, let go of it so the Magic
+ * Remote pointer can reach the TV keyboard (a separate surface). */
+static void typing_pointer(SDL_Window *win, bool typing)
+{
+    if (win) SDL_SetWindowGrab(win, typing ? SDL_FALSE : SDL_TRUE);
+}
+
 static bool text_input(SDL_Renderer *r, struct InputContext *in, const char *title, const char *help,
                        char *buf, size_t cap, bool digits_only, bool allow_dot, size_t max_len)
 {
-    static const char *ROWS_TEXT[] = { "1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm-_." };
-    static const char *ROWS_NUM[]  = { "123", "456", "789", "0" };
-    static const char *ROWS_IP[]   = { "123", "456", "789", ".0" };
-    const char **rows = digits_only ? (allow_dot ? ROWS_IP : ROWS_NUM) : ROWS_TEXT;
-    const int nrows = 4;
-    bool shift = false;
-    int fr = 0, fc = 0;                          /* focus row/col; row nrows = action row */
-    char work[128];
+    char work[128], pre[64] = "";
     snprintf(work, sizeof(work), "%s", buf);
     if (max_len == 0 || max_len >= sizeof(work)) max_len = sizeof(work) - 1;
+    /* (LG's SDL has no SDL_RenderGetWindow; main.c grabs the app window) */
+    SDL_Window *win = SDL_GetGrabbedWindow();
+    if (!win) win = SDL_GetKeyboardFocus();
+    if (!win) win = SDL_GetMouseFocus();
+    const int TOP = CONTENT_Y + 20, FX = 120, FW = SCREEN_W - 240, FH = 110, FY = TOP + 120;
+    SDL_Rect field = { FX, FY, FW, FH };
+    int focus = 0;                               /* 0 field, 1 Done, 2 Cancel */
+    Uint32 kb_seen = 0;                          /* last time the keyboard was up */
+    bool result = false, finished = false, kb_was_up = false;
+    const int BY = FY + FH + 40, BW = 340, BH = 96, CX = FX + BW + 24;
     drain_events();
+    typing_pointer(win, true);
+    open_tv_keyboard(&field);
+    kb_seen = SDL_GetTicks();
 
-    for (;;) {
-        bool quit = false;
-        SDL_Keycode k = poll_key(in, &quit);
-        int ncols_row = fr < nrows ? (int)strlen(rows[fr]) : (digits_only ? 2 : 4);
-        if (quit || ui_is_back_key(k)) { drain_events(); return false; }
-        if (k == SDLK_UP && fr > 0) { fr--; if (fc >= (int)strlen(rows[fr])) fc = (int)strlen(rows[fr]) - 1; }
-        if (k == SDLK_DOWN && fr < nrows) {
-            fr++;
-            int n = fr < nrows ? (int)strlen(rows[fr]) : (digits_only ? 2 : 4);
-            if (fc >= n) fc = n - 1;
+    while (!finished) {
+        bool kb_up = win && SDL_IsScreenKeyboardShown(win);
+        if (kb_up != kb_was_up) {
+            app_log_always("[UI] TV keyboard %s\n", kb_up ? "shown" : "hidden");
+            kb_was_up = kb_up;
+            if (!kb_up) SDL_StopTextInput();     /* else the IME keeps eating Back */
         }
-        if (k == SDLK_LEFT && fc > 0) fc--;
-        if (k == SDLK_RIGHT && fc < ncols_row - 1) fc++;
-        /* typing with a real keyboard or the remote's number keys */
-        if ((k >= SDLK_0 && k <= SDLK_9) || (k >= SDLK_KP_0 && k <= SDLK_KP_9)) {
-            char ch = (char)('0' + (k >= SDLK_KP_0 ? (k == SDLK_KP_0 ? 0 : k - SDLK_KP_1 + 1) : k - SDLK_0));
-            size_t l = strlen(work);
-            if (l < max_len) { work[l] = ch; work[l + 1] = '\0'; }
-        }
-        if (k == SDLK_BACKSPACE) { size_t l = strlen(work); if (l) work[l - 1] = '\0'; }
-        if (is_ok(k)) {
-            size_t l = strlen(work);
-            if (fr < nrows) {
-                char ch = rows[fr][fc];
-                if (ch == '<') { if (l) work[l - 1] = '\0'; }
-                else if (ch == '.' && digits_only && !allow_dot) {}
-                else if (l < max_len) {
-                    if (shift && isalpha((unsigned char)ch)) ch = (char)toupper((unsigned char)ch);
-                    work[l] = ch; work[l + 1] = '\0';
+        if (kb_up) kb_seen = SDL_GetTicks();
+        bool kb_recent = SDL_GetTicks() - kb_seen < 400;
+
+        pad_nav_poll(in);
+        SDL_Event ev;
+        while (!finished && SDL_PollEvent(&ev)) {
+            if (ev.type == SDL_QUIT) { finished = true; break; }
+            if (ev.type == SDL_TEXTINPUT) {
+                pre[0] = '\0';
+                append_text(work, max_len, ev.text.text, digits_only, allow_dot);
+                continue;
+            }
+            if (ev.type == SDL_TEXTEDITING) {
+                snprintf(pre, sizeof(pre), "%s", ev.edit.text);
+                continue;
+            }
+            SDL_Keycode k = ui_menu_key(&ev);
+            int hv = ui_pointer_hover();
+            if (hv >= 0 && hv <= 2) focus = hv;
+            if (!k) continue;
+            if (k == SDLK_BACKSPACE) {
+                size_t l = strlen(work);
+                if (l) work[l - 1] = '\0';
+            } else if (ui_is_back_key(k)) {
+                /* Back closes the TV keyboard first; only a second Back cancels */
+                if (!kb_up && !kb_recent) finished = true;
+            } else if (is_ok(k)) {
+                /* a click acts on what it hit; Enter on the TV keyboard means Done */
+                int act = ui_pointer_clicked() ? focus : kb_up ? 1 : focus;
+                if (act == 1) {
+                    append_text(work, max_len, pre, digits_only, allow_dot);
+                    snprintf(buf, cap, "%s", work);
+                    result = finished = true;
+                } else if (act == 2) {
+                    finished = true;
+                } else if (!kb_up) {
+                    open_tv_keyboard(&field);
+                    kb_seen = SDL_GetTicks();
                 }
-            } else if (digits_only) {
-                if (fc == 0) { if (l) work[l - 1] = '\0'; }
-                else { snprintf(buf, cap, "%s", work); drain_events(); return true; }
-            } else {
-                if (fc == 0) shift = !shift;
-                else if (fc == 1) { if (l < max_len) { work[l] = ' '; work[l + 1] = '\0'; } }
-                else if (fc == 2) { if (l) work[l - 1] = '\0'; }
-                else { snprintf(buf, cap, "%s", work); drain_events(); return true; }
+            } else if (!kb_up) {
+                if (k == SDLK_DOWN && focus == 0) focus = 1;
+                else if (k == SDLK_UP) focus = 0;
+                else if (k == SDLK_LEFT && focus == 2) focus = 1;
+                else if (k == SDLK_RIGHT && focus == 1) focus = 2;
+                else if ((k >= SDLK_0 && k <= SDLK_9) || (k >= SDLK_KP_0 && k <= SDLK_KP_9)) {
+                    /* the remote's number keys with the keyboard closed */
+                    char t[2] = { (char)('0' + (k >= SDLK_KP_0 ? (k == SDLK_KP_0 ? 0 : k - SDLK_KP_1 + 1)
+                                                               : k - SDLK_0)), 0 };
+                    append_text(work, max_len, t, digits_only, allow_dot);
+                }
             }
         }
+        if (finished) break;
 
         ui_draw_header(r, title, NULL);
-        const int TOP = CONTENT_Y + 20;
-        ui_text_draw_wrapped(r, 120, TOP, SCREEN_W - 240, help, 30, UI_FONT_REGULAR, C(COL_TEXT_DIM), 3);
-        /* the text so far */
+        ui_hit_add(0, FX, FY, FW, FH);
+        ui_hit_add(1, FX, BY, BW, BH);
+        ui_hit_add(2, CX, BY, BW, BH);
+        ui_text_draw_wrapped(r, FX, TOP, FW, help, 30, UI_FONT_REGULAR, C(COL_TEXT_DIM), 3);
+        bool ff = focus == 0 && !kb_up;
+        if (ff) { set_color(r, COL_TEXT); fill_rounded_rect(r, FX - 4, FY - 4, FW + 8, FH + 8, 18); }
         set_color(r, COL_CODE_BG);
-        fill_rounded_rect(r, 120, TOP + 120, SCREEN_W - 240, 110, 14);
+        fill_rounded_rect(r, FX, FY, FW, FH, 14);
         set_color(r, COL_ACCENT);
-        stroke_rounded_rect(r, 120, TOP + 120, SCREEN_W - 240, 110, 14);
-        char shown[160];
-        snprintf(shown, sizeof(shown), "%s_", work);
-        ui_text_draw(r, 150, TOP + 120 + (110 - ui_text_line_height(56)) / 2, shown, 56,
+        stroke_rounded_rect(r, FX, FY, FW, FH, 14);
+        char shown[200];
+        snprintf(shown, sizeof(shown), "%s%s%s", work, pre, (SDL_GetTicks() / 500) % 2 ? "_" : " ");
+        ui_text_draw(r, FX + 30, FY + (FH - ui_text_line_height(56)) / 2, shown, 56,
                      UI_FONT_SEMIBOLD, C(COL_TEXT), UI_ALIGN_LEFT);
-
-        /* keys */
-        const int KW = digits_only ? 220 : 128, KH = 96, KG = 14;
-        int ky = TOP + 280;
-        for (int rr = 0; rr < nrows; rr++) {
-            int n = (int)strlen(rows[rr]);
-            int x0 = (SCREEN_W - (n * KW + (n - 1) * KG)) / 2;
-            for (int cc = 0; cc < n; cc++) {
-                char ch = rows[rr][cc], lab[8];
-                if (ch == '<') snprintf(lab, sizeof(lab), "Del");
-                else if (ch == ' ') snprintf(lab, sizeof(lab), "_");
-                else snprintf(lab, sizeof(lab), "%c", (shift && isalpha((unsigned char)ch)) ? toupper((unsigned char)ch) : ch);
-                if (ch == '.' && digits_only && !allow_dot) { lab[0] = ' '; lab[1] = '\0'; }
-                big_button(r, x0 + cc * (KW + KG), ky, KW, KH, lab, fr == rr && fc == cc, true, false);
-            }
-            ky += KH + KG;
-        }
-        ky += 10;
-        if (digits_only) {
-            const int AW = 340, AX = (SCREEN_W - (2 * AW + KG)) / 2;
-            big_button(r, AX, ky, AW, KH, "Delete", fr == nrows && fc == 0, true, false);
-            big_button(r, AX + AW + KG, ky, AW, KH, "Done", fr == nrows && fc == 1, true, true);
-        } else {
-            static const char *ACT[] = { "Shift", "Space", "Delete", "Done" };
-            const int AW = 300, AX = (SCREEN_W - (4 * AW + 3 * KG)) / 2;
-            for (int i = 0; i < 4; i++)
-                big_button(r, AX + i * (AW + KG), ky, AW, KH, ACT[i], fr == nrows && fc == i, true, i == 3);
-        }
+        big_button(r, FX, BY, BW, BH, "Done", focus == 1 && !kb_up, true, true);
+        big_button(r, CX, BY, BW, BH, "Cancel", focus == 2 && !kb_up, true, false);
+        ui_text_draw_wrapped(r, FX + 2 * BW + 64, BY + 8, FW - 2 * BW - 64,
+                             kb_up ? "Type with the TV keyboard; its Enter key finishes."
+                                   : "Select the field to open the TV keyboard again.",
+                             28, UI_FONT_REGULAR, C(COL_TEXT_FAINT), 2);
         SDL_RenderPresent(r);
         SDL_Delay(16);
     }
+    SDL_StopTextInput();
+    typing_pointer(win, false);
+    drain_events();
+    return result;
 }
 
 /* ── QR code ───────────────────────────────────────────────────────────────── */
@@ -250,7 +306,7 @@ static void draw_qr(SDL_Renderer *r, const char *text, int x, int y, int size)
 
 typedef struct {
     char code[128];
-    char *account, *refresh;
+    char *account, *online_id, *refresh;
     char err[256];
     bool ok;
 } LoginJob;
@@ -258,11 +314,11 @@ typedef struct {
 static void login_job(void *p)
 {
     LoginJob *j = p;
-    j->ok = psn_login_with_code(j->code, &j->account, &j->refresh, j->err, sizeof(j->err));
+    j->ok = psn_login_with_code(j->code, &j->account, &j->online_id, &j->refresh, j->err, sizeof(j->err));
 }
 
-/* Gets the PSN account ID (needed once, for every console). */
-bool ui_psn_sign_in(SDL_Renderer *r, struct InputContext *in, AppConfig *cfg, const char *config_path)
+/* Signs in to a PSN account and adds it to the account list; returns its index or -1. */
+int ui_psn_sign_in(SDL_Renderer *r, struct InputContext *in, AppConfig *cfg, const char *config_path)
 {
     char msg[256] = "";
     int focus = 0;                               /* 0 Enter code, 1 Cancel */
@@ -270,28 +326,35 @@ bool ui_psn_sign_in(SDL_Renderer *r, struct InputContext *in, AppConfig *cfg, co
     for (;;) {
         bool quit = false;
         SDL_Keycode k = poll_key(in, &quit);
-        if (quit || ui_is_back_key(k)) { drain_events(); return false; }
+        int hv = ui_pointer_hover();
+        if (hv == 0 || hv == 1) focus = hv;
+        if (quit || ui_is_back_key(k)) { drain_events(); return -1; }
         if (k == SDLK_UP || k == SDLK_LEFT) focus = 0;
         if (k == SDLK_DOWN || k == SDLK_RIGHT) focus = 1;
         if (is_ok(k)) {
-            if (focus == 1) { drain_events(); return false; }
-            char code[64] = "";
+            if (focus == 1) { drain_events(); return -1; }
+            char code[100] = "";
             if (text_input(r, in, "Sign-in code",
-                           "Type the characters after \"code=v3.\" in the address bar of the page you "
-                           "reached after signing in (letters and digits, upper and lower case matter).",
-                           code, sizeof(code), false, false, 40) && code[0]) {
+                           "Type the characters after \"code=\" in the address of the page you reached "
+                           "after signing in, up to the \"&\" (upper and lower case matter). "
+                           "Pasting the whole address works too.",
+                           code, sizeof(code), false, false, 90) && code[0]) {
                 LoginJob j;
                 memset(&j, 0, sizeof(j));
                 snprintf(j.code, sizeof(j.code), "%s", code);
                 run_busy(r, "Signing in", login_job, &j);
                 if (j.ok) {
-                    config_set_str(&cfg->psn_account_id_b64, j.account);
-                    if (j.refresh) config_set_str(&cfg->psn_refresh_token, j.refresh);
-                    free(j.account); free(j.refresh);
-                    config_save(cfg, config_path);
-                    return true;
+                    int idx = config_add_psn_account(cfg, j.online_id, j.account, j.refresh);
+                    free(j.account); free(j.online_id); free(j.refresh);
+                    if (idx >= 0) {
+                        config_select_console(cfg, cfg->current);   // refresh token may have changed
+                        config_save(cfg, config_path);
+                        return idx;
+                    }
+                    snprintf(msg, sizeof(msg), "Too many accounts: sign one out in App settings first.");
+                } else {
+                    snprintf(msg, sizeof(msg), "Sign-in failed: %s. Scan the code and sign in again for a new code.", j.err);
                 }
-                snprintf(msg, sizeof(msg), "Sign-in failed: %s. Scan the code and sign in again for a new code.", j.err);
             }
         }
 
@@ -300,7 +363,8 @@ bool ui_psn_sign_in(SDL_Renderer *r, struct InputContext *in, AppConfig *cfg, co
         draw_qr(r, psn_login_url(), 120, TOP, QS);
         int tx = 120 + QS + 80, tw = SCREEN_W - tx - 120, y = TOP;
         ui_text_draw_wrapped(r, tx, y, tw,
-                             "Registering a console needs your PSN account. This is done once for all consoles.",
+                             "Linking a console needs the PSN account you use on it. The TV remembers "
+                             "the account, so other consoles can use it too.",
                              32, UI_FONT_SEMIBOLD, C(COL_TEXT), 3);
         y += 120;
         y += ui_text_draw_wrapped(r, tx, y, tw,
@@ -308,15 +372,17 @@ bool ui_psn_sign_in(SDL_Renderer *r, struct InputContext *in, AppConfig *cfg, co
                                   30, UI_FONT_REGULAR, C(COL_TEXT), 3) + 18;
         y += ui_text_draw_wrapped(r, tx, y, tw,
                                   "2. You end up on a page whose address starts with "
-                                  "remoteplay.dl.playstation.net/remoteplay/redirect?code=v3.  "
+                                  "remoteplay.dl.playstation.net/remoteplay/redirect?code=  "
                                   "The page itself may look empty or show an error; that is fine.",
                                   30, UI_FONT_REGULAR, C(COL_TEXT), 4) + 18;
         y += ui_text_draw_wrapped(r, tx, y, tw,
-                                  "3. Select Enter code and type the characters after code=v3. "
-                                  "(about 6). Codes expire after a few minutes.",
+                                  "3. Select Enter code and type what follows code= up to the & "
+                                  "(about 6 characters, e.g. aB3xYz). Codes expire after a few minutes.",
                                   30, UI_FONT_REGULAR, C(COL_TEXT), 3) + 30;
         big_button(r, tx, y, 420, 100, "Enter code", focus == 0, true, true);
         big_button(r, tx + 450, y, 300, 100, "Cancel", focus == 1, true, false);
+        ui_hit_add(0, tx, y, 420, 100);
+        ui_hit_add(1, tx + 450, y, 300, 100);
         if (msg[0])
             ui_text_draw_wrapped(r, tx, y + 130, tw, msg, 28, UI_FONT_SEMIBOLD, C(COL_ERROR), 3);
         SDL_RenderPresent(r);
@@ -348,12 +414,163 @@ static void regist_job(void *p)
     console_regist_free(reg);
 }
 
-/* Asks for the PIN and registers; fills out on success. */
-static bool pair_console(SDL_Renderer *r, struct InputContext *in, ChiakiLog *log, AppConfig *cfg,
-                         const char *config_path, const char *host, bool ps5, int target, RegistResult *out)
+/* Consoles linked with account a, as "PS5, Living room" (or "no consoles"). */
+static void account_users(const AppConfig *cfg, const char *account_id, char *out, size_t outlen)
 {
-    if (!cfg->psn_account_id_b64 && !ui_psn_sign_in(r, in, cfg, config_path))
-        return false;
+    out[0] = '\0';
+    for (int c = 0; c < cfg->n_consoles; c++) {
+        const ConsoleConfig *cc = &cfg->consoles[c];
+        if (!cc->psn_account_id_b64 || !account_id || strcmp(cc->psn_account_id_b64, account_id)) continue;
+        size_t l = strlen(out);
+        snprintf(out + l, outlen - l, "%s%s", l ? ", " : "", cc->name ? cc->name : "Console");
+    }
+    if (!out[0]) snprintf(out, outlen, "no consoles");
+}
+
+/* List rows used by the account screens. */
+static void list_row(SDL_Renderer *r, int x, int y, int w, const char *title, const char *sub, bool f)
+{
+    if (f) { set_color(r, COL_TEXT); fill_rounded_rect(r, x - 4, y - 4, w + 8, 108, 18); }
+    if (f) set_color(r, COL_ACCENT); else set_color(r, COL_CARD);
+    fill_rounded_rect(r, x, y, w, 100, 14);
+    ui_text_draw_fit(r, x + 30, y + 10, w - 60, title, 38, UI_FONT_SEMIBOLD, C(COL_TEXT));
+    ui_text_draw_fit(r, x + 30, y + 58, w - 60, sub, 26, UI_FONT_REGULAR, f ? C(COL_TEXT) : C(COL_TEXT_DIM));
+}
+
+/* Which PSN account to link a console with: one already signed in on the TV,
+ * or a new sign-in.  Returns the account index or -1. */
+static int choose_psn_account(SDL_Renderer *r, struct InputContext *in, AppConfig *cfg,
+                              const char *config_path, const char *preselect)
+{
+    if (cfg->n_psn_accounts == 0) return ui_psn_sign_in(r, in, cfg, config_path);
+    int focus = config_find_psn_account(cfg, preselect);
+    if (focus < 0) focus = 0;
+    drain_events();
+    for (;;) {
+        int n = cfg->n_psn_accounts, items = n + 1;
+        bool quit = false;
+        SDL_Keycode k = poll_key(in, &quit);
+        int hv = ui_pointer_hover();
+        if (hv >= 0 && hv < items) focus = hv;
+        if (quit || ui_is_back_key(k)) { drain_events(); return -1; }
+        if (k == SDLK_UP && focus > 0) focus--;
+        if (k == SDLK_DOWN && focus < items - 1) focus++;
+        if (is_ok(k)) {
+            if (focus < n) { drain_events(); return focus; }
+            int idx = ui_psn_sign_in(r, in, cfg, config_path);
+            if (idx >= 0) return idx;
+            drain_events();
+        }
+
+        ui_draw_header(r, "Which PSN account?", NULL);
+        const int LX = 120, W = SCREEN_W - 240;
+        int y = CONTENT_Y + 24;
+        ui_text_draw_wrapped(r, LX, y, W,
+                             "Pick the PSN account you use on this console, or sign in with another one.",
+                             30, UI_FONT_REGULAR, C(COL_TEXT_DIM), 2);
+        y += 80;
+        int first = focus >= 5 ? focus - 4 : 0;
+        for (int i = first; i < n && i < first + 5; i++, y += 120) {
+            char users[200], sub[240];
+            account_users(cfg, cfg->psn_accounts[i].account_id_b64, users, sizeof(users));
+            snprintf(sub, sizeof(sub), "Used by: %s", users);
+            list_row(r, LX, y, W, cfg->psn_accounts[i].name, sub, focus == i);
+            ui_hit_add(i, LX, y, W, 100);
+        }
+        big_button(r, LX, y + 10, 700, 96, "+  Sign in with another account", focus == n, true, false);
+        ui_hit_add(n, LX, y + 10, 700, 96);
+        ui_draw_help_footer(r, "The console is linked with this account; you can link it again with another one later.",
+                            "Up/Down: move   OK: select   Back: cancel", NULL);
+        SDL_RenderPresent(r);
+        SDL_Delay(16);
+    }
+}
+
+static void icon_button(SDL_Renderer *r, int x, int y, int w, int h, const char *icon, bool focused);
+
+/* Manage the signed-in PSN accounts (App settings).  Each account row has a
+ * trash button at its end, like the consoles on the start screen. */
+void ui_psn_accounts(SDL_Renderer *r, struct InputContext *in, AppConfig *cfg, const char *config_path)
+{
+    int focus = 0, col = 0;                      /* col 0 account, 1 trash */
+    char msg[160] = "";
+    drain_events();
+    for (;;) {
+        int n = cfg->n_psn_accounts, items = n + 1;
+        if (focus >= items) focus = items - 1;
+        bool quit = false;
+        SDL_Keycode k = poll_key(in, &quit);
+        int hv = ui_pointer_hover();
+        if (hv >= 0 && hv / 2 < items) { focus = hv / 2; col = hv % 2; }
+        if (quit || ui_is_back_key(k)) break;
+        if (k == SDLK_UP && focus > 0) focus--;
+        if (k == SDLK_DOWN && focus < items - 1) focus++;
+        if (k == SDLK_RIGHT) col = 1;
+        if (k == SDLK_LEFT) col = 0;
+        if (focus >= n) col = 0;
+        if (is_ok(k)) {
+            msg[0] = '\0';
+            if (focus < n && col == 0) {
+                /* the account row itself: nothing to do */
+            } else if (focus < n) {
+                char q[160];
+                snprintf(q, sizeof(q), "Sign out of %s?", cfg->psn_accounts[focus].name);
+                ui_draw_header(r, "PSN accounts", NULL);
+                if (confirm(r, in, q, "Consoles linked with it keep working. Cloud wakeup for them stops "
+                            "until you sign in with this account again.", "Sign out", "Keep")) {
+                    app_log_always("[UI] signed out of PSN account %s\n", cfg->psn_accounts[focus].name);
+                    config_remove_psn_account(cfg, focus);
+                    config_save(cfg, config_path);
+                    snprintf(msg, sizeof(msg), "Signed out.");
+                    col = 0;
+                }
+            } else if (ui_psn_sign_in(r, in, cfg, config_path) >= 0) {
+                snprintf(msg, sizeof(msg), "Signed in.");
+            }
+            drain_events();
+        }
+
+        ui_draw_header(r, "PSN accounts", NULL);
+        const int LX = 120, W = SCREEN_W - 240;
+        int y = CONTENT_Y + 24;
+        if (n == 0)
+            ui_text_draw(r, LX, y + 10, "No account signed in. Adding a console signs in.", 32,
+                         UI_FONT_SEMIBOLD, C(COL_TEXT_DIM), UI_ALIGN_LEFT);
+        if (n == 0) y += 80;
+        const int IW = 112, RW = W - IW - 16;
+        int first = focus >= 6 ? focus - 5 : 0;
+        for (int i = first; i < n && i < first + 6; i++, y += 120) {
+            char users[200], sub[260];
+            account_users(cfg, cfg->psn_accounts[i].account_id_b64, users, sizeof(users));
+            snprintf(sub, sizeof(sub), "Used by: %s  ·  cloud wakeup %s", users,
+                     cfg->psn_accounts[i].refresh_token ? "available" : "not available");
+            list_row(r, LX, y, RW, cfg->psn_accounts[i].name, sub, focus == i && col == 0);
+            icon_button(r, LX + RW + 16, y, IW, 100, UI_ICON_TRASH, focus == i && col == 1);
+            ui_hit_add(i * 2, LX, y, RW, 100);
+            ui_hit_add(i * 2 + 1, LX + RW + 16, y, IW, 100);
+        }
+        big_button(r, LX, y + 10, 600, 96, "+  Sign in", focus == n, n < MAX_PSN_ACCOUNTS, false);
+        ui_hit_add(n * 2, LX, y + 10, 600, 96);
+        ui_draw_help_footer(r, focus >= n ? "Sign in with another PSN account."
+                               : col == 1 ? "Sign this account out of the TV."
+                                          : "A PSN account signed in on this TV.",
+                            "Arrows: move   OK: select   Back: return", msg);
+        SDL_RenderPresent(r);
+        SDL_Delay(16);
+    }
+    drain_events();
+}
+
+/* Picks the PSN account, asks for the PIN and registers; fills out and
+ * account_out (the account ID) on success. */
+static bool pair_console(SDL_Renderer *r, struct InputContext *in, ChiakiLog *log, AppConfig *cfg,
+                         const char *config_path, const char *host, bool ps5, int target,
+                         const char *preselect, RegistResult *out, char *account_out, size_t account_cap)
+{
+    int ai = choose_psn_account(r, in, cfg, config_path, preselect);
+    if (ai < 0) return false;
+    char account[32];
+    snprintf(account, sizeof(account), "%s", cfg->psn_accounts[ai].account_id_b64);
     char help[512];
     snprintf(help, sizeof(help),
              "On the %s: %s. Enter the 8-digit number shown there. "
@@ -374,10 +591,14 @@ static bool pair_console(SDL_Renderer *r, struct InputContext *in, ChiakiLog *lo
         RegistJob j;
         memset(&j, 0, sizeof(j));
         j.log = log; j.host = host; j.ps5 = ps5; j.target = target;
-        j.account = cfg->psn_account_id_b64;
+        j.account = account;
         j.pin = (uint32_t)strtoul(pin, NULL, 10);
         run_busy(r, "Linking", regist_job, &j);
-        if (j.state == REGIST_OK) { *out = j.res; return true; }
+        if (j.state == REGIST_OK) {
+            *out = j.res;
+            snprintf(account_out, account_cap, "%s", account);
+            return true;
+        }
         snprintf(help, sizeof(help),
                  "Linking failed. Check that the PIN is still shown on the console (it changes after a "
                  "few minutes) and that the console is on. On the %s: %s.", ps5 ? "PS5" : "PS4",
@@ -386,8 +607,9 @@ static bool pair_console(SDL_Renderer *r, struct InputContext *in, ChiakiLog *lo
     }
 }
 
-static void store_pairing(ConsoleConfig *c, const RegistResult *res)
+static void store_pairing(ConsoleConfig *c, const RegistResult *res, const char *account)
 {
+    config_set_str(&c->psn_account_id_b64, account);
     config_set_str(&c->registered_key_b64, res->regist_key_b64);
     config_set_str(&c->rp_key_b64, res->rp_key_b64);
     c->rp_key_type = res->rp_key_type;
@@ -425,6 +647,8 @@ static int add_console(SDL_Renderer *r, struct InputContext *in, ChiakiLog *log,
 
         bool quit = false;
         SDL_Keycode k = poll_key(in, &quit);
+        int hv = ui_pointer_hover();
+        if (hv >= 0 && hv < items) focus = hv;
         if (quit || ui_is_back_key(k)) { drain_events(); return -1; }
         if (k == SDLK_UP && focus > 0) focus--;
         if (k == SDLK_DOWN && focus < items - 1) focus++;
@@ -469,6 +693,7 @@ static int add_console(SDL_Renderer *r, struct InputContext *in, ChiakiLog *log,
             if (f) { set_color(r, COL_TEXT); fill_rounded_rect(r, LX - 4, y - 4, W + 8, 108, 18); }
             if (f) set_color(r, COL_ACCENT); else set_color(r, COL_CARD);
             fill_rounded_rect(r, LX, y, W, 100, 14);
+            ui_hit_add(i, LX, y, W, 100);
             ui_text_draw(r, LX + 30, y + 10, found[i].name[0] ? found[i].name : found[i].addr, 38,
                          UI_FONT_SEMIBOLD, C(COL_TEXT), UI_ALIGN_LEFT);
             char sub[128];
@@ -481,6 +706,7 @@ static int add_console(SDL_Renderer *r, struct InputContext *in, ChiakiLog *log,
         }
         if (n == 0) y += 80;
         big_button(r, LX, y + 10, 600, 96, "Enter address manually", focus == n, true, false);
+        ui_hit_add(n, LX, y + 10, 600, 96);
         ui_draw_help_footer(r, "Select your console. Not listed? Enter its address manually.",
                             "Up/Down: move   OK: select   Back: cancel", NULL);
         SDL_RenderPresent(r);
@@ -493,11 +719,13 @@ static int add_console(SDL_Renderer *r, struct InputContext *in, ChiakiLog *log,
     for (int c = 0; c < cfg->n_consoles; c++)
         if (cfg->consoles[c].host && !strcmp(cfg->consoles[c].host, host)) idx = c;
     RegistResult res;
-    if (!pair_console(r, in, log, cfg, config_path, host, ps5, target, &res))
+    char account[32];
+    if (!pair_console(r, in, log, cfg, config_path, host, ps5, target,
+                      idx >= 0 ? cfg->consoles[idx].psn_account_id_b64 : NULL, &res, account, sizeof(account)))
         return -1;
     if (idx < 0) idx = config_add_console(cfg, res.nickname, host, res.ps5);
     if (idx < 0) return -1;
-    store_pairing(&cfg->consoles[idx], &res);
+    store_pairing(&cfg->consoles[idx], &res, account);
     config_select_console(cfg, idx);
     config_save(cfg, config_path);
     app_log_always("[HOME] added console \"%s\" at %s\n", cfg->consoles[idx].name, host);
@@ -506,11 +734,12 @@ static int add_console(SDL_Renderer *r, struct InputContext *in, ChiakiLog *log,
 
 /* ── console settings ──────────────────────────────────────────────────────── */
 
-enum { CS_NAME, CS_ADDRESS, CS_RES, CS_FPS, CS_BITRATE, CS_CODEC, CS_WAKE, CS_REST, CS_PAIR, CS_REMOVE, CS_BACK, CS_COUNT };
+enum { CS_NAME, CS_ADDRESS, CS_ACCOUNT, CS_RES, CS_FPS, CS_BITRATE, CS_CODEC, CS_WAKE, CS_REST, CS_PAIR, CS_REMOVE, CS_BACK, CS_COUNT };
 
 static const char *CS_HELP[CS_COUNT] = {
     [CS_NAME]    = "The name shown on the start screen.",
     [CS_ADDRESS] = "The console's IP address on your network.",
+    [CS_ACCOUNT] = "The PSN account this console is linked with. OK links it again with this or another account (needs a new PIN).",
     [CS_RES]     = "Stream resolution. Remote Play streams at up to 1080p; the TV upscales it.",
     [CS_FPS]     = "60 fps feels much smoother; 30 fps uses half the bandwidth.",
     [CS_BITRATE] = "Higher looks sharper but needs a stronger network. Lower it if the picture stutters.",
@@ -546,6 +775,8 @@ static bool console_settings(SDL_Renderer *r, struct InputContext *in, ChiakiLog
 
         bool quit = false;
         SDL_Keycode k = poll_key(in, &quit);
+        int hv = ui_pointer_hover();
+        if (hv >= 0 && hv < CS_COUNT) focus = hv;
         if (quit || ui_is_back_key(k)) break;
         if (k == SDLK_UP && focus > 0) focus--;
         if (k == SDLK_DOWN && focus < CS_COUNT - 1) focus++;
@@ -579,14 +810,16 @@ static bool console_settings(SDL_Renderer *r, struct InputContext *in, ChiakiLog
             case CS_CODEC:   codec_i = (codec_i + d + N_CODEC) % N_CODEC; config_set_str(&c->video_codec, CODEC_OPTIONS[codec_i]); break;
             case CS_WAKE:    c->wakeup = !c->wakeup; break;
             case CS_REST:    c->sleep_on_exit = (c->sleep_on_exit + (fwd ? 1 : 2)) % 3; break;
+            case CS_ACCOUNT:
             case CS_PAIR:
                 changed = false;
                 if (is_ok(k)) {
                     RegistResult res;
-                    char host[64];
+                    char host[64], account[32];
                     snprintf(host, sizeof(host), "%s", c->host ? c->host : "");
-                    if (pair_console(r, in, log, cfg, config_path, host, c->ps5, 0, &res)) {
-                        store_pairing(&cfg->consoles[idx], &res);
+                    if (pair_console(r, in, log, cfg, config_path, host, c->ps5, 0, c->psn_account_id_b64,
+                                     &res, account, sizeof(account))) {
+                        store_pairing(&cfg->consoles[idx], &res, account);
                         changed = true;
                         snprintf(msg, sizeof(msg), "Linked again.");
                     }
@@ -636,11 +869,13 @@ static bool console_settings(SDL_Renderer *r, struct InputContext *in, ChiakiLog
 #define GROUP(x, y, name) do { set_color(r, COL_ACCENT); draw_text(r, (x) + 4, (y), name, 2); (y) += 34; } while (0)
 #define ROW(x, y, id, label, value) do { \
         ui_draw_option_row(r, (x), (y), COL_W, ROW_H, label, value, focus == (id)); \
+        ui_hit_add((id), (x), (y), COL_W, ROW_H); \
         (y) += ROW_H + ROW_GAP; } while (0)
         int y = CONTENT_Y + 6;
         GROUP(LX, y, "CONSOLE");
         ROW(LX, y, CS_NAME, "Name", c->name);
         ROW(LX, y, CS_ADDRESS, "Address", c->host ? c->host : "-");
+        ROW(LX, y, CS_ACCOUNT, "PSN account", config_psn_account_name(cfg, c->psn_account_id_b64));
         y += GROUP_GAP;
         GROUP(LX, y, "VIDEO");
         snprintf(v, sizeof(v), "%s  (%dx%d)", RES_OPTIONS[res_i].label, RES_OPTIONS[res_i].w, RES_OPTIONS[res_i].h);
@@ -657,9 +892,12 @@ static bool console_settings(SDL_Renderer *r, struct InputContext *in, ChiakiLog
         ROW(RX, y, CS_REST, "Rest mode on exit", SLEEP_LABELS[c->sleep_on_exit % 3]);
         y += GROUP_GAP;
         GROUP(RX, y, "MANAGE");
-        draw_button(r, RX, y, COL_W, ROW_H + 6, "Link again", focus == CS_PAIR, true); y += ROW_H + 6 + ROW_GAP;
-        draw_button(r, RX, y, COL_W, ROW_H + 6, "Remove console", focus == CS_REMOVE, true); y += ROW_H + 6 + ROW_GAP + GROUP_GAP;
+        draw_button(r, RX, y, COL_W, ROW_H + 6, "Link again", focus == CS_PAIR, true);
+        ui_hit_add(CS_PAIR, RX, y, COL_W, ROW_H + 6); y += ROW_H + 6 + ROW_GAP;
+        draw_button(r, RX, y, COL_W, ROW_H + 6, "Remove console", focus == CS_REMOVE, true);
+        ui_hit_add(CS_REMOVE, RX, y, COL_W, ROW_H + 6); y += ROW_H + 6 + ROW_GAP + GROUP_GAP;
         draw_button(r, RX, y, COL_W, ROW_H + 6, "Back", focus == CS_BACK, true);
+        ui_hit_add(CS_BACK, RX, y, COL_W, ROW_H + 6);
 #undef ROW
 #undef GROUP
         ui_draw_help_footer(r, CS_HELP[focus], "Up/Down: move   Left/Right/OK: change   Back: return", msg);
@@ -726,7 +964,15 @@ UIResult ui_run_home(SDL_Renderer *r, AppConfig *cfg, const char *config_path,
 
         bool quit = false;
         SDL_Keycode k = poll_key(in, &quit);
-        if (quit || ui_is_back_key(k)) { result = UI_RESULT_QUIT; break; }
+        int hv = ui_pointer_hover();
+        if (hv >= 0 && hv / 4 <= ROW_BOTTOM) { row = hv / 4; col = hv % 4; }
+        if (quit) { result = UI_RESULT_QUIT; break; }           /* Home button: leave at once */
+        if (ui_is_back_key(k)) {
+            /* the only screen where Back leaves the app: ask first */
+            if (confirm(r, in, "Exit Chiaki-lg?", "", "Exit", "Stay")) { result = UI_RESULT_QUIT; break; }
+            drain_events();
+            continue;
+        }
         if (k == SDLK_UP && row > 0) { row--; if (row >= n) col = 0; }
         if (k == SDLK_DOWN && row < ROW_BOTTOM) { row++; if (row >= n) col = 0; }
         int max_col = row < n ? HC_REMOVE : row == ROW_ADD ? 0 : 1;
@@ -740,8 +986,10 @@ UIResult ui_run_home(SDL_Renderer *r, AppConfig *cfg, const char *config_path,
                 ConsoleConfig *c = &cfg->consoles[row];
                 if (!console_registered(c)) {
                     RegistResult res;
-                    if (c->host && pair_console(r, in, log, cfg, config_path, c->host, c->ps5, 0, &res)) {
-                        store_pairing(c, &res);
+                    char account[32];
+                    if (c->host && pair_console(r, in, log, cfg, config_path, c->host, c->ps5, 0,
+                                                c->psn_account_id_b64, &res, account, sizeof(account))) {
+                        store_pairing(c, &res, account);
                         config_save(cfg, config_path);
                     }
                 } else if (!c->host || !valid_ipv4(c->host)) {
@@ -775,7 +1023,8 @@ UIResult ui_run_home(SDL_Renderer *r, AppConfig *cfg, const char *config_path,
             continue;
         }
 
-        /* ── draw ── */
+        /* ── draw ── (pointer ids: row * 4 + col) */
+        ui_hit_begin();
         const int M = 64, LW = 1180, RX = M + LW + 56, RW = SCREEN_W - RX - M;
         SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
         set_color(r, COL_BG);
@@ -819,6 +1068,9 @@ UIResult ui_run_home(SDL_Renderer *r, AppConfig *cfg, const char *config_path,
             ui_text_draw_fit(r, M + 66, y + 66, CW - 90, sub, 26, UI_FONT_REGULAR, fc ? C(COL_TEXT) : C(COL_TEXT_DIM));
             big_button(r, M + CW + 16, y + 6, BW, CH - 12, "Settings", row == i && col == HC_SETTINGS, true, false);
             icon_button(r, M + CW + 16 + BW + 16, y + 6, IW, CH - 12, UI_ICON_TRASH, row == i && col == HC_REMOVE);
+            ui_hit_add(i * 4 + HC_CARD, M, y, CW, CH);
+            ui_hit_add(i * 4 + HC_SETTINGS, M + CW + 16, y + 6, BW, CH - 12);
+            ui_hit_add(i * 4 + HC_REMOVE, M + CW + 16 + BW + 16, y + 6, IW, CH - 12);
         }
         /* + Add console */
         {
@@ -829,6 +1081,7 @@ UIResult ui_run_home(SDL_Renderer *r, AppConfig *cfg, const char *config_path,
                 if (f) { set_color(r, COL_TEXT); fill_rounded_rect(r, M - 4, y - 4, CW + 8, 96 + 8, 20); }
                 if (f) set_color(r, COL_ACCENT); else set_color(r, COL_PANEL);
                 fill_rounded_rect(r, M, y, CW, 96, 16);
+                ui_hit_add(ROW_ADD * 4, M, y, CW, 96);
                 set_color(r, COL_BORDER);
                 if (!f) stroke_rounded_rect(r, M, y, CW, 96, 16);
                 ui_text_draw(r, M + CW / 2, y + (96 - ui_text_line_height(36)) / 2,
@@ -841,6 +1094,8 @@ UIResult ui_run_home(SDL_Renderer *r, AppConfig *cfg, const char *config_path,
         const int BY = SCREEN_H - 76 - 130;
         big_button(r, M, BY, 380, 100, "App settings", row == ROW_BOTTOM && col == 0, true, false);
         big_button(r, M + 404, BY, 380, 100, "Controller test", row == ROW_BOTTOM && col == 1, true, false);
+        ui_hit_add(ROW_BOTTOM * 4, M, BY, 380, 100);
+        ui_hit_add(ROW_BOTTOM * 4 + 1, M + 404, BY, 380, 100);
         if (msg[0]) {
             bool bad = strstr(msg, "ailed") || strstr(msg, "first");
             ui_text_draw_wrapped(r, M + 820, BY + 10, LW - 820, msg, 28, UI_FONT_SEMIBOLD,
@@ -884,7 +1139,7 @@ UIResult ui_run_home(SDL_Renderer *r, AppConfig *cfg, const char *config_path,
         set_color(r, COL_PANEL);
         fill_rect(r, 0, SCREEN_H - 76, SCREEN_W, 76);
         ui_text_draw(r, SCREEN_W / 2, SCREEN_H - 76 + (76 - ui_text_line_height(28)) / 2,
-                     "Arrows / D-pad: move    OK / Cross: select    Back / Circle: exit",
+                     "Arrows / D-pad / pointer: move    OK / Cross: select    Back / Circle: exit",
                      28, UI_FONT_REGULAR, C(COL_TEXT_DIM), UI_ALIGN_CENTER);
         SDL_RenderPresent(r);
         SDL_Delay(16);

@@ -3,6 +3,7 @@
 #include "config.h"
 
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_webOS.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
@@ -34,10 +35,142 @@ static void push_key(SDL_Keycode sym)
     SDL_PushEvent(&ev);
 }
 
+/* ── Pointer (LG Magic Remote) and menu keys ─────────────────────────────── */
+#define MAX_HITS 96
+typedef struct { int id; SDL_Rect rc; } HitRect;
+static HitRect g_hits[MAX_HITS];
+static int     g_nhits;
+static int     g_hover = -1;
+static bool    g_hover_new, g_last_click;
+static Uint32  g_click_ms, g_enter_ms;
+
+void ui_hit_begin(void) { g_nhits = 0; }
+
+void ui_hit_add(int id, int x, int y, int w, int h)
+{
+    if (g_nhits < MAX_HITS) g_hits[g_nhits++] = (HitRect){ id, { x, y, w, h } };
+}
+
+static int hit_test(int x, int y)
+{
+    for (int i = g_nhits - 1; i >= 0; i--) {        /* last drawn is on top */
+        const SDL_Rect *rc = &g_hits[i].rc;
+        if (x >= rc->x && x < rc->x + rc->w && y >= rc->y && y < rc->y + rc->h) return g_hits[i].id;
+    }
+    return -1;
+}
+
+void ui_pointer_reset(void) { g_hover = -1; g_hover_new = false; g_last_click = false; }
+
+int ui_pointer_hover(void)
+{
+    if (!g_hover_new) return -1;
+    g_hover_new = false;
+    return g_hover;
+}
+
+bool ui_pointer_clicked(void) { return g_last_click; }
+
+bool ui_is_back_key(SDL_Keycode k)
+{
+    return k == SDLK_ESCAPE || k == WEBOS_KEY_BACK || k == UI_KEY_WEBOS_BACK || k == WEBOS_KEY_RED;
+}
+
+/* The remote's Back arrives with keycode 0 and the webOS scancode 482. */
+bool ui_is_back_event(const SDL_Event *ev)
+{
+    return ev->type == SDL_KEYDOWN &&
+           (ev->key.keysym.scancode == (SDL_Scancode)UI_SCANCODE_WEBOS_BACK || ui_is_back_key(ev->key.keysym.sym));
+}
+
+/* Pointer visibility, like LG's own apps: a direction key hides it at once,
+ * and it hides after POINTER_IDLE_MS without remote movement.  Moving the
+ * Magic Remote brings it back (webOS reports that as scancode 484 / motion). */
+#define POINTER_IDLE_MS 8000
+#define SC_CURSOR_SHOW  484   /* SDL_WEBOS_SCANCODE_CURSOR_SHOW */
+#define SC_CURSOR_HIDE  485
+static bool   g_ptr_visible = true;
+static Uint32 g_ptr_active_ms;
+
+static void pointer_set_visible(bool v)
+{
+    if (v == g_ptr_visible) return;
+    g_ptr_visible = v;
+    SDL_webOSCursorVisibility(v ? SDL_TRUE : SDL_FALSE);   /* return value is meaningless here */
+    app_log("[UI] pointer %s\n", v ? "shown" : "hidden");
+}
+
+void ui_pointer_event(const SDL_Event *ev)
+{
+    Uint32 now = SDL_GetTicks() | 1u;
+    switch (ev->type) {
+    case SDL_MOUSEMOTION: case SDL_MOUSEBUTTONDOWN: case SDL_MOUSEBUTTONUP: case SDL_MOUSEWHEEL:
+        g_ptr_active_ms = now;
+        pointer_set_visible(true);
+        break;
+    case SDL_KEYDOWN: {
+        int sc = (int)ev->key.keysym.scancode;
+        SDL_Keycode k = ev->key.keysym.sym;
+        if (sc == SC_CURSOR_SHOW) { g_ptr_visible = true; g_ptr_active_ms = now; }   /* webOS showed it */
+        else if (sc == SC_CURSOR_HIDE) g_ptr_visible = false;                       /* webOS hid it */
+        else if (k == SDLK_UP || k == SDLK_DOWN || k == SDLK_LEFT || k == SDLK_RIGHT) pointer_set_visible(false);
+        break;
+    }
+    }
+}
+
+void ui_pointer_tick(void)
+{
+    Uint32 now = SDL_GetTicks() | 1u;
+    if (!g_ptr_active_ms) g_ptr_active_ms = now;     /* start counting at launch */
+    if (g_ptr_visible && now - g_ptr_active_ms >= POINTER_IDLE_MS) pointer_set_visible(false);
+}
+
+SDL_Keycode ui_menu_key(const SDL_Event *ev)
+{
+    Uint32 now = SDL_GetTicks();
+    ui_pointer_event(ev);
+    switch (ev->type) {
+    case SDL_KEYDOWN: {
+        SDL_Keycode k = ev->key.keysym.sym;
+        int sc = (int)ev->key.keysym.scancode;
+        if (sc == 484 || sc == 485) { g_hover = -1; return 0; }   /* webOS pointer shown / hidden */
+        if (ui_is_back_event(ev)) return SDLK_ESCAPE;
+        if (k == SDLK_RETURN || k == SDLK_KP_ENTER) {
+            if (g_click_ms && now - g_click_ms < 250) return 0;  /* the same press as a click */
+            g_enter_ms = now;
+        }
+        g_last_click = false;
+        return k;
+    }
+    case SDL_MOUSEMOTION: {
+        int id = hit_test(ev->motion.x, ev->motion.y);
+        if (id >= 0 && id != g_hover) { g_hover = id; g_hover_new = true; }
+        return 0;
+    }
+    case SDL_MOUSEBUTTONDOWN: {
+        if (ev->button.button != SDL_BUTTON_LEFT) return 0;
+        if (g_enter_ms && now - g_enter_ms < 250) return 0;      /* already handled as OK */
+        int id = hit_test(ev->button.x, ev->button.y);
+        if (id < 0) return 0;
+        g_hover = id;
+        g_hover_new = true;
+        g_click_ms = now;
+        g_last_click = true;
+        return SDLK_RETURN;
+    }
+    case SDL_MOUSEWHEEL:
+        g_last_click = false;
+        return ev->wheel.y > 0 ? SDLK_UP : ev->wheel.y < 0 ? SDLK_DOWN : 0;
+    }
+    return 0;
+}
+
 void pad_nav_poll(struct InputContext *in)
 {
     static uint32_t prev;
     static Uint32 repeat_at;
+    ui_pointer_tick();                   /* every menu frame comes through here */
     if (!in) return;
 
     ChiakiControllerState st;
@@ -314,7 +447,7 @@ static const char *PROFILE_LABELS[]  = {"Automatic", "PlayStation (HID)", "PlayS
 #define N_PROFILES ((int)(sizeof(PROFILE_OPTIONS) / sizeof(PROFILE_OPTIONS[0])))
 
 static const char *SETTING_HELP[SET_COUNT] = {
-    [SET_PSN]           = "The PSN account used to link consoles (and for cloud wakeup). OK signs out; you sign in again the next time you link a console.",
+    [SET_PSN]           = "PSN accounts signed in on this TV. Each console is linked with one of them (also used for cloud wakeup). OK: sign in or out.",
     [SET_STATS_CORNER]  = "Where the stream stats appear. Show or hide them with Up on the remote or Mute on the DualSense.",
     [SET_LOG_LEVEL]     = "How much is written to /tmp/chiaki.log. Warning is enough unless you are debugging.",
     [SET_INPUT_DEBUG]   = "Log every raw controller event. Only for diagnosing controller problems.",
@@ -340,11 +473,6 @@ static int log_level_idx(int mask)
 }
 
 const char *on_off(bool v) { return v ? "On" : "Off"; }
-
-bool ui_is_back_key(SDL_Keycode k)
-{
-    return k == SDLK_ESCAPE || k == WEBOS_KEY_BACK || k == WEBOS_KEY_RED;
-}
 
 /* Settings row: label on the left, value chip on the right */
 void ui_draw_option_row(SDL_Renderer *r, int x, int y, int w, int h,
@@ -385,6 +513,7 @@ void ui_draw_option_row(SDL_Renderer *r, int x, int y, int w, int h,
 
 void ui_draw_header(SDL_Renderer *r, const char *title, const char *right_note)
 {
+    ui_hit_begin();                  /* every settings-style screen starts its frame here */
     set_color(r, COL_BG);
     fill_rect(r, 0, 0, SCREEN_W, SCREEN_H);
     set_color(r, COL_PANEL);
@@ -438,11 +567,16 @@ static void ui_render_settings_screen(SDL_Renderer *r, const AppConfig *cfg, int
 #define GROUP(x, y, name) do { set_color(r, COL_ACCENT); draw_text(r, (x) + 4, (y), name, 2); (y) += 34; } while (0)
 #define ROW(x, y, id, label, value) do { \
         ui_draw_option_row(r, (x), (y), COL_W, ROW_H, label, value, focus == (id)); \
+        ui_hit_add((id), (x), (y), COL_W, ROW_H); \
         (y) += ROW_H + ROW_GAP; } while (0)
 
     int y = CONTENT_Y + 6;
     GROUP(LX, y, "ACCOUNT");
-    ROW(LX, y, SET_PSN, "PlayStation Network", cfg->psn_account_id_b64 ? "Signed in" : "Not signed in");
+    char psn[64];
+    if (cfg->n_psn_accounts == 0) snprintf(psn, sizeof(psn), "Not signed in");
+    else if (cfg->n_psn_accounts == 1) snprintf(psn, sizeof(psn), "%s", cfg->psn_accounts[0].name);
+    else snprintf(psn, sizeof(psn), "%d accounts", cfg->n_psn_accounts);
+    ROW(LX, y, SET_PSN, "PSN accounts", psn);
     y += GROUP_GAP;
     GROUP(LX, y, "STREAM");
     ROW(LX, y, SET_STATS_CORNER, "Stats overlay position", CORNER_LABELS[cfg->stats_corner & 3]);
@@ -467,6 +601,7 @@ static void ui_render_settings_screen(SDL_Renderer *r, const AppConfig *cfg, int
     ROW(RX, y, SET_BT_PATCH, "Bluetooth fix (DualSense)", on_off(cfg->dualsense_bt_patch));
     y += GROUP_GAP;
     draw_button(r, RX, y, COL_W, ROW_H + 6, "Back", focus == SET_RETURN, true);
+    ui_hit_add(SET_RETURN, RX, y, COL_W, ROW_H + 6);
 #undef ROW
 #undef GROUP
 
@@ -487,13 +622,16 @@ void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg, const char *config_
     bool input_changed = false, wants_exit = false;
     char msg[128] = {0};
 
+    ui_pointer_reset();
     while (!wants_exit) {
         pad_nav_poll(input);
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
             if (ev.type == SDL_QUIT) { wants_exit = true; continue; }
-            if (ev.type != SDL_KEYDOWN) continue;
-            SDL_Keycode sym = ev.key.keysym.sym;
+            SDL_Keycode sym = ui_menu_key(&ev);
+            int hv = ui_pointer_hover();
+            if (hv >= 0 && hv < SET_COUNT) focus = hv;
+            if (!sym) continue;
             if (ui_is_back_key(sym)) { wants_exit = true; continue; }
             if      (sym == SDLK_UP   && focus > 0)          focus--;
             else if (sym == SDLK_DOWN && focus < SET_RETURN) focus++;
@@ -505,13 +643,9 @@ void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg, const char *config_
                 switch (focus) {
                 case SET_PSN:
                     if (sym != SDLK_RETURN && sym != SDLK_KP_ENTER) { changed = false; break; }
-                    if (cfg->psn_account_id_b64) {
-                        config_set_str(&cfg->psn_account_id_b64, NULL);
-                        config_set_str(&cfg->psn_refresh_token, NULL);
-                        app_log_always("[UI] signed out of PSN\n");
-                    } else if (!ui_psn_sign_in(renderer, input, cfg, config_path)) {
-                        changed = false;
-                    }
+                    ui_psn_accounts(renderer, input, cfg, config_path);
+                    changed = false;
+                    msg[0] = '\0';
                     break;
                 case SET_STATS_CORNER: cfg->stats_corner = (cfg->stats_corner + (fwd ? 1 : 3)) % 4; break;
                 case SET_LOG_LEVEL:    log_idx = (log_idx + (fwd ? 1 : 5)) % 6; cfg->log_level = LOG_LEVEL_MASKS[log_idx]; break;
@@ -556,6 +690,7 @@ void ui_run_settings(SDL_Renderer *renderer, AppConfig *cfg, const char *config_
 
 void ui_render_loading(SDL_Renderer *r, const char *base_text)
 {
+    ui_hit_begin();                  /* nothing to click while loading */
     int sw = SCREEN_W, sh = SCREEN_H;
     ui_screen_size(r, &sw, &sh);
 
@@ -769,17 +904,20 @@ bool ui_ask_rest_mode(SDL_Renderer *r, struct InputContext *input)
     SDL_Event ev;
     while (SDL_PollEvent(&ev)) { /* drop the keys that led here */ }
 
+    ui_pointer_reset();
     while (answer < 0) {
         pad_nav_poll(input);
         while (SDL_PollEvent(&ev)) {
             if (ev.type == SDL_QUIT) { answer = 0; break; }
-            if (ev.type != SDL_KEYDOWN) continue;
-            SDL_Keycode k = ev.key.keysym.sym;
+            SDL_Keycode k = ui_menu_key(&ev);
+            int hv = ui_pointer_hover();
+            if (hv == 0 || hv == 1) focus = hv;
             if (k == SDLK_LEFT)  focus = 0;
             if (k == SDLK_RIGHT) focus = 1;
             if (k == SDLK_RETURN || k == SDLK_KP_ENTER) { answer = focus == 0; break; }
-            if (k == SDLK_ESCAPE || k == WEBOS_KEY_BACK || k == WEBOS_KEY_RED) { answer = 0; break; }
+            if (ui_is_back_key(k)) { answer = 0; break; }
         }
+        ui_hit_begin();
 
         /* dim the (still running) video, then the dialog */
         SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
@@ -799,6 +937,8 @@ bool ui_ask_rest_mode(SDL_Renderer *r, struct InputContext *input)
         int x0 = SCREEN_W / 2 - W - GAP / 2;
         big_button(r, x0, Y, W, H, "Rest mode", focus == 0, true, false);
         big_button(r, x0 + W + GAP, Y, W, H, "Keep on", focus == 1, true, false);
+        ui_hit_add(0, x0, Y, W, H);
+        ui_hit_add(1, x0 + W + GAP, Y, W, H);
 
         SDL_RenderPresent(r);
         SDL_Delay(16);

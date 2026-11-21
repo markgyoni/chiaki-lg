@@ -76,6 +76,7 @@ static void console_free(ConsoleConfig *c)
 {
     free(c->name); free(c->host); free(c->mac);
     free(c->registered_key_b64); free(c->rp_key_b64); free(c->video_codec);
+    free(c->psn_account_id_b64);
     memset(c, 0, sizeof(*c));
 }
 
@@ -100,6 +101,7 @@ static void console_read(ConsoleConfig *c, struct json_object *o)
     if (codec) { free(c->video_codec); c->video_codec = codec; }
     c->wakeup = json_get_bool(o, "wakeup", true);
     c->sleep_on_exit = parse_sleep(o, "sleep_on_exit", SLEEP_ASK);
+    c->psn_account_id_b64 = json_get_nonempty(o, "psn_account_id");
     // PS5 Remote Play streams at up to 1080p; larger requests are refused
     // ("AvCap failed to initialize video"), so clamp.
     if (c->video_width > 1920 || c->video_height > 1080) {
@@ -129,9 +131,65 @@ static struct json_object *console_to_json(const ConsoleConfig *c)
     S("video_codec", c->video_codec);
     json_object_object_add(o, "wakeup", json_object_new_boolean(c->wakeup));
     S("sleep_on_exit", SLEEP_STRS[c->sleep_on_exit % 3]);
+    S("psn_account_id", c->psn_account_id_b64);
 #undef S
     return o;
 }
+
+/* ── PSN accounts ──────────────────────────────────────────────────────────── */
+
+int config_find_psn_account(const AppConfig *cfg, const char *account_id_b64)
+{
+    if (!account_id_b64) return -1;
+    for (int i = 0; i < cfg->n_psn_accounts; i++)
+        if (cfg->psn_accounts[i].account_id_b64 && !strcmp(cfg->psn_accounts[i].account_id_b64, account_id_b64))
+            return i;
+    return -1;
+}
+
+int config_add_psn_account(AppConfig *cfg, const char *name, const char *account_id_b64,
+                           const char *refresh_token)
+{
+    if (!account_id_b64 || !account_id_b64[0]) return -1;
+    int i = config_find_psn_account(cfg, account_id_b64);
+    if (i < 0) {
+        if (cfg->n_psn_accounts >= MAX_PSN_ACCOUNTS) return -1;
+        i = cfg->n_psn_accounts++;
+        memset(&cfg->psn_accounts[i], 0, sizeof(PsnAccount));
+        cfg->psn_accounts[i].account_id_b64 = strdup(account_id_b64);
+    }
+    PsnAccount *a = &cfg->psn_accounts[i];
+    if (name && name[0]) config_set_str(&a->name, name);
+    if (!a->name) config_set_str(&a->name, "PSN account");
+    if (refresh_token && refresh_token[0]) config_set_str(&a->refresh_token, refresh_token);
+    return i;
+}
+
+static void psn_account_free(PsnAccount *a)
+{
+    free(a->name); free(a->account_id_b64); free(a->refresh_token);
+    memset(a, 0, sizeof(*a));
+}
+
+void config_remove_psn_account(AppConfig *cfg, int idx)
+{
+    if (idx < 0 || idx >= cfg->n_psn_accounts) return;
+    psn_account_free(&cfg->psn_accounts[idx]);
+    memmove(&cfg->psn_accounts[idx], &cfg->psn_accounts[idx + 1],
+            sizeof(PsnAccount) * (size_t)(cfg->n_psn_accounts - idx - 1));
+    cfg->n_psn_accounts--;
+    memset(&cfg->psn_accounts[cfg->n_psn_accounts], 0, sizeof(PsnAccount));
+    config_select_console(cfg, cfg->current);   // drops the active refresh token if it was this one
+}
+
+const char *config_psn_account_name(const AppConfig *cfg, const char *account_id_b64)
+{
+    int i = config_find_psn_account(cfg, account_id_b64);
+    if (i >= 0 && cfg->psn_accounts[i].name) return cfg->psn_accounts[i].name;
+    return account_id_b64 && account_id_b64[0] ? "Signed-out account" : "None";
+}
+
+/* ── consoles ──────────────────────────────────────────────────────────────── */
 
 int config_add_console(AppConfig *cfg, const char *name, const char *host, bool ps5)
 {
@@ -165,6 +223,8 @@ void config_select_console(AppConfig *cfg, int idx)
         config_set_str(&cfg->registered_key_b64, NULL);
         config_set_str(&cfg->rp_key_b64, NULL);
         config_set_str(&cfg->ps5_mac, NULL);
+        config_set_str(&cfg->psn_account_id_b64, NULL);
+        config_set_str(&cfg->psn_refresh_token, NULL);
         cfg->wakeup = false;
         return;
     }
@@ -183,6 +243,9 @@ void config_select_console(AppConfig *cfg, int idx)
     cfg->ps5 = c->ps5;
     cfg->wakeup = c->wakeup && c->host && c->host[0];
     cfg->sleep_on_exit = c->sleep_on_exit;
+    config_set_str(&cfg->psn_account_id_b64, c->psn_account_id_b64);
+    int a = config_find_psn_account(cfg, c->psn_account_id_b64);
+    config_set_str(&cfg->psn_refresh_token, a >= 0 ? cfg->psn_accounts[a].refresh_token : NULL);
 }
 
 /* ── load / save ───────────────────────────────────────────────────────────── */
@@ -213,8 +276,27 @@ int config_load(AppConfig *cfg, const char *path)
         free(legacy_key);
     }
 
-    cfg->psn_account_id_b64 = json_get_nonempty(root, "psn_account_id");
-    cfg->psn_refresh_token  = json_get_nonempty(root, "psn_refresh_token");
+    /* PSN accounts (pre-0.8: one account at the top level, used by every console) */
+    if (json_object_object_get_ex(root, "psn_accounts", &arr) && json_object_is_type(arr, json_type_array)) {
+        size_t n = json_object_array_length(arr);
+        for (size_t i = 0; i < n; i++) {
+            struct json_object *o = json_object_array_get_idx(arr, i);
+            char *name = json_get_nonempty(o, "name"), *id = json_get_nonempty(o, "account_id"),
+                 *tok = json_get_nonempty(o, "refresh_token");
+            config_add_psn_account(cfg, name, id, tok);
+            free(name); free(id); free(tok);
+        }
+    }
+    {
+        char *id = json_get_nonempty(root, "psn_account_id"), *tok = json_get_nonempty(root, "psn_refresh_token");
+        if (id) {
+            config_add_psn_account(cfg, NULL, id, tok);
+            for (int i = 0; i < cfg->n_consoles; i++)
+                if (!cfg->consoles[i].psn_account_id_b64) cfg->consoles[i].psn_account_id_b64 = strdup(id);
+            app_log_always("[CFG] migrated the PSN account to the account list\n");
+        }
+        free(id); free(tok);
+    }
 
     cfg->audio_volume     = json_get_int(root,  "audio_volume",     100);
     cfg->hw_decode        = json_get_bool(root, "hw_decode",        false);
@@ -270,8 +352,8 @@ int config_load(AppConfig *cfg, const char *path)
     cfg->video_codec = strdup("h265");
     config_select_console(cfg, cfg->n_consoles ? (last >= 0 && last < cfg->n_consoles ? last : 0) : -1);
 
-    fprintf(stderr, "[CONFIG] Loaded: %d console(s), current=%d psn_account=%s psn_wakeup=%s log_level=0x%x\n",
-            cfg->n_consoles, cfg->current, cfg->psn_account_id_b64 ? "yes" : "no",
+    fprintf(stderr, "[CONFIG] Loaded: %d console(s), current=%d, %d PSN account(s), psn_account=%s psn_wakeup=%s log_level=0x%x\n",
+            cfg->n_consoles, cfg->current, cfg->n_psn_accounts, cfg->psn_account_id_b64 ? "yes" : "no",
             cfg->psn_refresh_token ? "yes" : "no", cfg->log_level);
     return 0;
 }
@@ -306,8 +388,20 @@ bool config_save(const AppConfig *cfg, const char *path)
 
 #define SETV(k, v) do { json_object_object_del(root, k); json_object_object_add(root, k, v); } while (0)
     SETV("last_console", json_object_new_int(cfg->current < 0 ? 0 : cfg->current));
-    SETV("psn_account_id", json_object_new_string(cfg->psn_account_id_b64 ? cfg->psn_account_id_b64 : ""));
-    SETV("psn_refresh_token", json_object_new_string(cfg->psn_refresh_token ? cfg->psn_refresh_token : ""));
+    json_object_object_del(root, "psn_account_id");      // pre-0.8; now per console / in psn_accounts
+    json_object_object_del(root, "psn_refresh_token");
+    {
+        struct json_object *acc = json_object_new_array();
+        for (int i = 0; i < cfg->n_psn_accounts; i++) {
+            const PsnAccount *a = &cfg->psn_accounts[i];
+            struct json_object *o = json_object_new_object();
+            json_object_object_add(o, "name", json_object_new_string(a->name ? a->name : ""));
+            json_object_object_add(o, "account_id", json_object_new_string(a->account_id_b64 ? a->account_id_b64 : ""));
+            json_object_object_add(o, "refresh_token", json_object_new_string(a->refresh_token ? a->refresh_token : ""));
+            json_object_array_add(acc, o);
+        }
+        SETV("psn_accounts", acc);
+    }
     SETV("stats_corner", json_object_new_string(CORNER_STRS[cfg->stats_corner & 3]));
     SETV("log_level", json_object_new_string(log_level_str(cfg->log_level)));
     SETV("input_debug", json_object_new_boolean(cfg->input_debug));
@@ -332,6 +426,7 @@ bool config_save(const AppConfig *cfg, const char *path)
 void config_free(AppConfig *cfg)
 {
     for (int i = 0; i < cfg->n_consoles; i++) console_free(&cfg->consoles[i]);
+    for (int i = 0; i < cfg->n_psn_accounts; i++) psn_account_free(&cfg->psn_accounts[i]);
     free(cfg->host);
     free(cfg->psn_account_id_b64);
     free(cfg->registered_key_b64);

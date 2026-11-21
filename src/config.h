@@ -4,6 +4,14 @@
 enum { SLEEP_OFF = 0, SLEEP_ON = 1, SLEEP_ASK = 2 };
 
 #define MAX_CONSOLES 8
+#define MAX_PSN_ACCOUNTS 8
+
+/* A signed-in PSN account.  Consoles are linked with one of these. */
+typedef struct {
+    char    *name;              // online ID shown in the UI
+    char    *account_id_b64;    // 8-byte account ID, base64
+    char    *refresh_token;     // OAuth refresh token for cloud wakeup (may be NULL)
+} PsnAccount;
 
 /* One registered console (PS5 or PS4) and its own stream settings. */
 typedef struct {
@@ -21,6 +29,7 @@ typedef struct {
     char    *video_codec;       // "h265", "h265_hdr" or "h264"
     bool     wakeup;            // wake the console when connecting
     int      sleep_on_exit;     // SLEEP_OFF / SLEEP_ON / SLEEP_ASK
+    char    *psn_account_id_b64; // the PSN account this console is linked with
 } ConsoleConfig;
 
 typedef struct {
@@ -29,12 +38,14 @@ typedef struct {
     int      n_consoles;
     int      current;           // console selected for the next stream (-1 = none)
 
-    /* PSN account (shared by all consoles) */
-    char    *psn_account_id_b64; // 8-byte account ID, base64 (from PSN sign-in)
-    char    *psn_refresh_token;  // OAuth refresh token for cloud wakeup (optional)
+    /* signed-in PSN accounts (each console picks one) */
+    PsnAccount psn_accounts[MAX_PSN_ACCOUNTS];
+    int      n_psn_accounts;
 
     /* Active console, copied from consoles[current] by config_select_console().
      * The stream code reads these. */
+    char    *psn_account_id_b64; // the console's account
+    char    *psn_refresh_token;  // that account's refresh token (cloud wakeup), may be NULL
     char    *host;
     char    *registered_key_b64;
     char    *rp_key_b64;
@@ -78,6 +89,15 @@ void config_select_console(AppConfig *cfg, int idx);
 /* A new console with default stream settings; returns its index or -1 if full. */
 int  config_add_console(AppConfig *cfg, const char *name, const char *host, bool ps5);
 void config_remove_console(AppConfig *cfg, int idx);
+
+/* PSN accounts.  add: updates the entry with the same account ID, else
+ * appends (returns -1 if full).  remove: consoles keep their account ID. */
+int  config_find_psn_account(const AppConfig *cfg, const char *account_id_b64);
+int  config_add_psn_account(AppConfig *cfg, const char *name, const char *account_id_b64,
+                            const char *refresh_token);
+void config_remove_psn_account(AppConfig *cfg, int idx);
+/* Display name for an account ID. */
+const char *config_psn_account_name(const AppConfig *cfg, const char *account_id_b64);
 
 /* Replace *dst with a copy of src (NULL → NULL). */
 void config_set_str(char **dst, const char *src);
