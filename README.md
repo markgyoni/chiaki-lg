@@ -52,10 +52,18 @@ To wake the PS5 from rest mode, turn on **Settings › System › Power Saving �
 
 In the menus, **Back** on the remote (or **Circle**) always takes you one step back.
 
+## DualSense over Bluetooth
+
+Over USB the DualSense's vibration, adaptive triggers and lightbar work on any TV. Over Bluetooth they don't out of the box: the TV's Bluetooth system delivers those commands to Xbox controllers the way they need them, but sends them to every other controller in a form the DualSense quietly ignores.
+
+On a **rooted** TV, Chiaki-webOS fixes this with its **Bluetooth fix** (App settings › Controllers, on by default). It tweaks that one decision in the TV's running Bluetooth service, so controllers named "Wireless Controller" (DualSense, DualShock 4, Xbox) are treated alike. Nothing on the TV's storage is changed: restarting the TV undoes it, and the app applies it again automatically.
+
+The fix only touches the TV if it finds exactly the code it expects; on any other Bluetooth system it does nothing. If it doesn't work on your TV, [open an issue](../../issues) with your TV model and webOS version.
+
 ## Tips
 
 - **Picture stutters?** Open the console's **Settings** in the app and lower the bitrate, or use a wired connection.
-- **Vibration, triggers or lightbar not working over Bluetooth?** These need a rooted TV. Over USB they work on any TV.
+- **Vibration, triggers or lightbar not working over Bluetooth?** See [DualSense over Bluetooth](#dualsense-over-bluetooth) above.
 - **Settings not kept right after installing?** On a TV without root, restart the TV once after the first install.
 - **Coming from chiaki-lg?** Install Chiaki-webOS and open it once: your consoles and settings are copied over. Then remove the old app.
 
