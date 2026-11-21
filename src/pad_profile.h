@@ -4,7 +4,7 @@
  * The same evdev code means different physical buttons depending on the
  * kernel driver (e.g. a DualSense on hid-generic reports Square as
  * BTN_SOUTH), so each driver/controller family gets its own table.
- * See ROADMAP.md (Stage 1) and docs/controllers/. */
+ */
 
 #include <stdbool.h>
 #include <stdint.h>

@@ -99,7 +99,7 @@ bool ds_parse_input(const uint8_t *rep, size_t len, DsInputState *out)
     return false;
 }
 
-/* ── Motion (Stage 6) ──────────────────────────────────────────────────────── */
+/* ── Motion ──────────────────────────────────────────────────────── */
 
 #define DS_GYRO_RES_PER_DEG_S 1024   /* hid-playstation */
 #define DS_ACC_RES_PER_G      8192
@@ -226,7 +226,7 @@ void ds_motion_reset(DsMotion *m)
     chiaki_orientation_tracker_init(&m->tracker);
 }
 
-/* ── Outputs (Stage 7) ─────────────────────────────────────────────────────── */
+/* ── Outputs ─────────────────────────────────────────────────────── */
 /* Layout: Linux hid-playstation struct dualsense_output_report_common (47 B),
  * same as SDL's DS5EffectsState_t:
  *   0 valid_flag0   1 valid_flag1   2 motor_right(weak)   3 motor_left(strong)

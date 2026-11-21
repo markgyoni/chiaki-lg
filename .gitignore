@@ -6,3 +6,8 @@ third-party/
 *.a
 *.log
 /tmp/
+
+# local working notes, not part of the project
+CLAUDE.md
+ROADMAP.md
+docs/controllers/

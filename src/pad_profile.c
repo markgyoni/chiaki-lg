@@ -45,7 +45,7 @@ enum {
  * order (Square, Cross, Circle, Triangle, L1, R1, L2, R2, Create, Options,
  * L3, R3, PS, Touchpad, Mute) and hid-input numbers them from BTN_SOUTH.
  * Triggers are analog on RX/RY, so the digital L2/R2 bits are ignored.
- * Verified on webOS 6 — docs/controllers/dualsense-bt-webos6.md. */
+ * Verified on webOS 6. */
 static const PadProfile PROFILE_SONY_GENERIC = {
     .id = "sony_generic",
     .description = "PlayStation pad on hid-generic",

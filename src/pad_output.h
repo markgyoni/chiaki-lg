@@ -3,7 +3,7 @@
  *   - evdev force feedback (FF_RUMBLE) when the kernel driver supports it
  *   - raw HID output reports for pads whose driver does not (webOS runs
  *     most Bluetooth pads on hid-generic, which has no force feedback)
- * See ROADMAP.md Stage 3. */
+ */
 
 #include <stdbool.h>
 #include <stdint.h>

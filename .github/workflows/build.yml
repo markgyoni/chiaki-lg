@@ -1,0 +1,147 @@
+name: Build
+
+# Every push to main and every pull request is built and checked.
+# Pushing a tag vX.Y.Z (matching "version" in packaging/appinfo.json) also
+# publishes a GitHub release with the .ipk and the webOS Homebrew manifest.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # chiaki-ng (the Remote Play library) and the webOS toolchain we build against
+  CHIAKI_NG_REF: 43728af2e639fecb8a7af1cd68c29820a40de973
+  WEBOS_SDK_TAG: webos-a38c582
+  APP_ID: dev.markgyoni.chiakiwebos
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: App version
+        id: version
+        run: |
+          version=$(jq -r .version packaging/appinfo.json)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/v* && "${GITHUB_REF_NAME#v}" != "$version" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match appinfo.json version $version"
+            exit 1
+          fi
+
+      - name: Host tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q autoconf automake libtool pkg-config file protobuf-compiler wget
+          pip3 install --user --break-system-packages "cmake<4" nanopb protobuf
+          # CMake 4 cannot configure some of the older dependencies
+          for t in cmake ctest cpack; do sudo ln -sf "$HOME/.local/bin/$t" /usr/local/bin/$t; done
+          cmake --version | head -1
+
+      - name: chiaki-ng
+        run: |
+          git clone --filter=blob:none https://github.com/streetpea/chiaki-ng.git ../chiaki-ng
+          git -C ../chiaki-ng checkout -q "$CHIAKI_NG_REF"
+          git -C ../chiaki-ng submodule update --init --depth 1 third-party/nanopb
+
+      - name: webOS toolchain
+        run: |
+          mkdir -p ~/webos-sdk
+          wget -q "https://github.com/openlgtv/buildroot-nc4/releases/download/$WEBOS_SDK_TAG/arm-webos-linux-gnueabi_sdk-buildroot-x86_64.tar.gz" -O /tmp/sdk.tar.gz
+          tar -xzf /tmp/sdk.tar.gz -C ~/webos-sdk
+          cd ~/webos-sdk/arm-webos-linux-gnueabi_sdk-buildroot
+          ./relocate-sdk.sh
+          # the bundled cmake needs libssl 1.1; use the host one
+          for t in cmake ctest cpack; do ln -sf /usr/local/bin/$t bin/$t; done
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: /tmp/webos-staging
+          key: deps-${{ env.WEBOS_SDK_TAG }}-${{ hashFiles('build-webos.sh') }}
+
+      - name: Build
+        env:
+          TOOLCHAIN_DIR: /home/runner/webos-sdk/arm-webos-linux-gnueabi_sdk-buildroot
+        run: |
+          export CHIAKI_WEBOS_GIT="$(git describe --tags --always --dirty)"
+          ./build-webos.sh ../chiaki-ng
+          ls -la build-webos/*.ipk
+
+      - name: webOS Homebrew manifest
+        run: |
+          version='${{ steps.version.outputs.version }}'
+          ipk="build-webos/${APP_ID}_${version}_arm.ipk"
+          installed=$(ar p "$ipk" control.tar.gz | tar -xzO | sed -n 's/^Installed-Size: *//p')
+          jq -n \
+            --arg id "$APP_ID" --arg version "$version" \
+            --arg title "$(jq -r .title packaging/appinfo.json)" \
+            --arg desc "$(jq -r .appDescription packaging/appinfo.json)" \
+            --arg icon "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/docs/branding/icon-160.png" \
+            --arg source "https://github.com/${GITHUB_REPOSITORY}" \
+            --arg ipk "$(basename "$ipk")" \
+            --arg sha "$(sha256sum "$ipk" | cut -d' ' -f1)" \
+            --argjson size "$(stat -c %s "$ipk")" \
+            --argjson installed "${installed:-0}" \
+            '{id: $id, version: $version, type: "native", title: $title, appDescription: $desc,
+              iconUri: $icon, sourceUrl: $source, rootRequired: "optional",
+              ipkUrl: $ipk, ipkHash: {sha256: $sha}, ipkSize: $size, installedSize: $installed}' \
+            > "build-webos/${APP_ID}.manifest.json"
+          cat "build-webos/${APP_ID}.manifest.json"
+
+      - name: Compatibility check (webosbrew ipk-verify)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download -R webosbrew/dev-toolbox-cli -p 'webosbrew-toolbox-ipk-verify_*_amd64.deb' -D /tmp/toolbox
+          sudo apt-get install -y -q /tmp/toolbox/*.deb
+          webosbrew-ipk-verify -f markdown -d -o "$GITHUB_STEP_SUMMARY" build-webos/*.ipk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chiaki-webos-${{ steps.version.outputs.version }}
+          path: |
+            build-webos/*.ipk
+            build-webos/*.manifest.json
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: chiaki-webos-${{ needs.build.outputs.version }}
+          path: dist
+
+      - name: Release notes
+        run: |
+          # the "## <version>" section of CHANGELOG.md
+          awk -v v="## ${{ needs.build.outputs.version }}" '
+            $0 == v {on=1; next} /^## / && on {exit} on' CHANGELOG.md > notes.md
+          cat notes.md
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.ipk dist/*.manifest.json \
+            --title "Chiaki-webOS ${{ needs.build.outputs.version }}" \
+            --notes-file notes.md --latest

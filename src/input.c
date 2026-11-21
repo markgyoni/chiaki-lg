@@ -94,7 +94,7 @@ typedef struct {
     bool dirty;                 // state changed since the last SYN_REPORT
     bool dropped;               // SYN_DROPPED seen: ignore events until next SYN_REPORT, then resync
 
-    // DualSense raw HID backend (Stage 4).  When hid_fd >= 0 the pad's state
+    // DualSense raw HID backend.  When hid_fd >= 0 the pad's state
     // comes from hidraw reports; the evdev node stays open and grabbed only so
     // webOS does not see the buttons, and its events are ignored.
     int          hid_fd;
@@ -104,8 +104,8 @@ typedef struct {
     int8_t       touch_cid[2];  // chiaki touch id per DualSense touch slot, -1 = up
     uint8_t      touch_did[2];  // DualSense contact id for that slot
     struct timespec ds_log_ts;
-    DsMotion     motion;        // gyro/accel → chiaki motion + orientation (Stage 6)
-    DsOutput     dsout;         // rumble/triggers/lightbar (Stage 7)
+    DsMotion     motion;        // gyro/accel → chiaki motion + orientation
+    DsOutput     dsout;         // rumble/triggers/lightbar
     uint16_t     bus, vendor, product;  // evdev input_id, for the UI
     bool         dsout_active;
     bool         dsout_wait_patch;  // BT DualSense: outputs held until btfix is active
@@ -146,7 +146,7 @@ struct InputContext {
     unsigned long   haptic_frames;              // stats for the log
     unsigned long   rumble_events;
 
-    // DualSense outputs requested by the PS5 (Stage 7).  Kept here so a pad
+    // DualSense outputs requested by the PS5.  Kept here so a pad
     // that connects mid-session gets the current state.
     bool            trigger_effects_enabled;    // config "trigger_effects"
     bool            bt_patch_enabled;           // config "dualsense_bt_patch"
@@ -554,7 +554,7 @@ static void try_open_pad_locked(InputContext *ctx, const char *path)
             // Ask for the calibration feature report: on Bluetooth this also
             // switches the pad from the 10-byte simple report to the full
             // 0x31 report (touchpad + motion).  Through webOS's uhid the ioctl
-            // returns EIO but the switch still happens (Stage 0 finding).
+            // returns EIO but the switch still happens.
             uint8_t feat[64] = { 0x05 };
             int r = ioctl(pad->hid_fd, HIDIOCGFEATURE(sizeof(feat)), feat);
             int feat_errno = errno;

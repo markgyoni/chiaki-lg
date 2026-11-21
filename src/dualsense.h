@@ -1,5 +1,5 @@
 #pragma once
-/* DualSense raw HID input parsing (Stage 4 of ROADMAP.md).
+/* DualSense raw HID input parsing.
  *
  * On webOS the DualSense runs on hid-generic, which only maps the basic
  * buttons/axes to evdev.  Touchpad, motion sensors and every output need the
@@ -44,7 +44,7 @@ bool ds_parse_input(const uint8_t *rep, size_t len, DsInputState *out);
 
 bool ds_is_dualsense(uint16_t vendor, uint16_t product);
 
-/* ── Motion (Stage 6) ──────────────────────────────────────────────────────── */
+/* ── Motion ──────────────────────────────────────────────────────── */
 
 #include <chiaki/orientation.h>
 
@@ -84,7 +84,7 @@ void ds_motion_update(DsMotion *m, const DsInputState *s, ChiakiControllerState 
 /* CHIAKI_EVENT_MOTION_RESET: re-zero orientation around the current pose. */
 void ds_motion_reset(DsMotion *m);
 
-/* ── Outputs (Stage 7): rumble, adaptive triggers, lightbar, player LEDs ──── */
+/* ── Outputs: rumble, adaptive triggers, lightbar, player LEDs ──── */
 
 /* Minimum gap between two output reports.  On webOS Bluetooth two reports
  * landing a few ms apart wedged the pad's input stream until it was power-

@@ -1,0 +1,20 @@
+title: Chiaki-webOS
+iconUri: https://raw.githubusercontent.com/markgyoni/chiaki-webos/main/docs/branding/icon-160.png
+detailIconUri: https://raw.githubusercontent.com/markgyoni/chiaki-webos/main/docs/branding/icon-512.png
+manifestUrl: https://github.com/markgyoni/chiaki-webos/releases/latest/download/dev.markgyoni.chiakiwebos.manifest.json
+category: game
+pool: main
+shortDescription: PS5 and PS4 Remote Play, built on chiaki-ng
+description: |
+  Play your PS5 or PS4 on your LG TV over your home network.
+
+  * PS5 and PS4, up to 1080p at 60 fps, with HDR
+  * DualSense touchpad, motion, vibration, adaptive triggers and lightbar
+  * DualShock 4 and Xbox controllers
+  * Wakes the console and can put it back to rest
+  * Several consoles and PSN accounts; set up on the TV with a QR code and the console's PIN
+  * TV remote, Magic Remote pointer or controller
+
+  Vibration, triggers and lightbar over Bluetooth need a rooted TV.
+
+  [Source and help](https://github.com/markgyoni/chiaki-webos)
