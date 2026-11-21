@@ -309,6 +309,45 @@ static void draw_text_centered(SDL_Renderer *r, int cx, int y,
 
 /* Rounded rect: a middle band plus one scanline per corner row, inset along
  * the circle.  radius = h/2 gives a pill. */
+/* The app's "Couch Pad" mark (docs/branding/logo.svg) as a size x size tile:
+ * a controller with a signal above it, drawn on the 200-unit grid of the SVG. */
+void ui_draw_logo(SDL_Renderer *r, int x, int y, int size)
+{
+    const float s = size / 200.0f;
+#define LX(v) (x + (int)lroundf((v) * s))
+#define LY(v) (y + (int)lroundf(((v) + 7) * s))
+#define LS(v) ((int)lroundf((v) * s))
+    set_color(r, 0x00, 0x43, 0x9c, 0xff);
+    fill_rounded_rect(r, x, y, size, size, size / 6);
+    /* two signal arcs over the pad, as rows of dots (round caps for free) */
+    /* the outer arc is white at 60% over the tile, as a solid colour so the
+     * overlapping dots don't darken */
+    static const struct { float rad, w; Uint8 red, green, blue; } ARCS[] = { { 19.8f, 9, 0xff, 0xff, 0xff }, { 33.9f, 9, 0x99, 0xb4, 0xd7 } };
+    for (int i = 0; i < 2; i++) {
+        set_color(r, ARCS[i].red, ARCS[i].green, ARCS[i].blue, 0xff);
+        int d = LS(ARCS[i].w);
+        if (d < 2) d = 2;
+        for (int deg = 225; deg <= 315; deg += 3) {
+            float rad = deg * 3.14159265f / 180.0f;
+            int cx = LX(100 + ARCS[i].rad * cosf(rad)), cy = LY(68 + ARCS[i].rad * sinf(rad));
+            fill_rounded_rect(r, cx - d / 2, cy - d / 2, d, d, d / 2);
+        }
+    }
+    set_color(r, 0xff, 0xff, 0xff, 0xff);
+    fill_rounded_rect(r, LX(30), LY(72), LS(140), LS(62), LS(31));
+    fill_rounded_rect(r, LX(30), LY(104), LS(48), LS(48), LS(24));
+    fill_rounded_rect(r, LX(122), LY(104), LS(48), LS(48), LS(24));
+    set_color(r, 0x00, 0x43, 0x9c, 0xff);
+    fill_rect(r, LX(51), LY(99), LS(24), LS(8));
+    fill_rect(r, LX(59), LY(91), LS(8), LS(24));
+    fill_rounded_rect(r, LX(143), LY(104), LS(14), LS(14), LS(7));
+    set_color(r, COL_ACCENT);
+    fill_rounded_rect(r, LX(127), LY(89), LS(14), LS(14), LS(7));
+#undef LX
+#undef LY
+#undef LS
+}
+
 void fill_rounded_rect(SDL_Renderer *r, int x, int y, int w, int h, int radius)
 {
     if (w <= 0 || h <= 0) return;

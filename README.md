@@ -36,12 +36,14 @@ Download the latest `.ipk` from the [Releases](../../releases/latest) page, then
 
 ```bash
 ares-setup-device   # one-time TV setup — TV must be on and in Developer Mode
-ares-install --device myTV org.homebrew.chiaki_*.ipk
+ares-install --device myTV dev.markgyoni.chiakiwebos_*.ipk
 ```
 
 Or use [WebOS Dev Manager](https://github.com/webosbrew/dev-manager-desktop) if you prefer a GUI — it can install IPKs directly via drag and drop.
 
 **TV requirements:** LG webOS 4.x or 5+ TV with [Homebrew Channel](https://github.com/webosbrew/webos-homebrew-channel) installed and Developer Mode enabled.
+
+**Upgrading from chiaki-lg** (app ID `org.homebrew.chiaki`, before 0.9.0): Chiaki-webOS installs as a separate app (`dev.markgyoni.chiakiwebos`) and copies the old app's settings, linked consoles and PSN accounts on its first start. Remove the old app afterwards.
 
 ### Step 2 — Add your console
 
@@ -64,7 +66,7 @@ The menus work with the TV remote, the LG Magic Remote pointer (point and click)
 
 Config file location on the TV:
 ```
-/media/developer/apps/usr/palm/applications/org.homebrew.chiaki/config.json
+/media/developer/apps/usr/palm/applications/dev.markgyoni.chiakiwebos/config.json
 ```
 
 Everything is managed in the app; you can also edit the file over SSH or WebOS Dev Manager.
@@ -219,7 +221,7 @@ Every launch logs each input device (`[PAD]`: name, bus, vendor/product, kernel 
 The IPK also ships a standalone `paddiag` tool for use over SSH (root):
 
 ```bash
-cd /media/developer/apps/usr/palm/applications/org.homebrew.chiaki
+cd /media/developer/apps/usr/palm/applications/dev.markgyoni.chiakiwebos
 ./paddiag info                      # capability dump
 ./paddiag events                    # live button/axis monitor (Ctrl-C to stop)
 ./paddiag hidraw /dev/hidraw0       # sample raw HID input reports
@@ -318,7 +320,7 @@ export TOOLCHAIN_DIR=~/webos-sdk/arm-webos-linux-gnueabi_sdk-buildroot
 ./build-webos.sh ../chiaki-ng 2>&1 | tee build.log
 ```
 
-The script cross-compiles all dependencies (OpenSSL, Opus, FFmpeg, json-c, miniupnpc, cURL, GF-Complete, Jerasure, SS4S), patches chiaki-ng sources for webOS glibc compatibility, pre-generates nanopb protobuf sources, builds the binary, and packages an `.ipk` via `ares-package`. Dependencies are cached in `/tmp/webos-staging` and skipped on subsequent runs.
+The script cross-compiles all dependencies (OpenSSL, Opus, FFmpeg, json-c, miniupnpc, cURL, GF-Complete, Jerasure, SS4S), patches chiaki-ng sources for webOS glibc compatibility, pre-generates nanopb protobuf sources, builds the binary, and packages an `.ipk` via `ares-package` (or, without ares-cli, `tools/make-ipk.sh`). Dependencies are cached in `/tmp/webos-staging` and skipped on subsequent runs.
 
 The IPK is output to `build-webos/*.ipk`.
 

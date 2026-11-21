@@ -1,5 +1,5 @@
 {
-  "id": "org.homebrew.chiaki",
+  "id": "dev.markgyoni.chiakiwebos",
   "type": "native",
   "main": "chiaki-webos",
   "icon": "icon.png",

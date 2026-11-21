@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Chiaki-webOS (formerly chiaki-lg, renamed in 0.9.0) is a native C port of [chiaki-ng](https://github.com/streetpea/chiaki-ng) (PS4/PS5 Remote Play) for LG webOS TVs. This repo contains only the app layer (`src/`, ~5k lines of C11); the Remote Play protocol comes from `libchiaki`, built from a separate chiaki-ng checkout. App ID is `org.homebrew.chiaki`. License AGPL-3.0-only with the OpenSSL exception (LICENSE, same as chiaki-ng).
+Chiaki-webOS (formerly chiaki-lg, renamed in 0.9.0) is a native C port of [chiaki-ng](https://github.com/streetpea/chiaki-ng) (PS4/PS5 Remote Play) for LG webOS TVs. This repo contains only the app layer (`src/`, ~5k lines of C11); the Remote Play protocol comes from `libchiaki`, built from a separate chiaki-ng checkout. App ID is `dev.markgyoni.chiakiwebos` (`org.homebrew.chiaki` before 0.9.0; main.c copies that app's config.json on first start). License AGPL-3.0-only with the OpenSSL exception (LICENSE, same as chiaki-ng).
 
 ## Build
 
@@ -22,7 +22,9 @@ Output: `build-webos/*.ipk`. Install with `ares-install --device myTV build-webo
 - New `.c` files must be added to `add_executable(chiaki-webos ...)` in `CMakeLists.txt`.
 - On WSL keep sources on the Linux filesystem (`~/`), not `/mnt/c/`.
 
-Host gotchas seen on Debian 13 WSL with buildroot-nc4 `webos-a38c582`: the SDK's bundled `cmake` needs `libssl.so.1.1` (replace `bin/cmake` with a pip-installed `cmake<4`; CMake 4 breaks old deps), chiaki-ng's `lib/protobuf` needs a host `protoc` at configure time, and `relocate-sdk.sh` needs the `file` command. Without `ares-package` on PATH the script stops after staging `build-webos/ipk-staging`.
+Host gotchas seen on Debian 13 WSL with buildroot-nc4 `webos-a38c582`: the SDK's bundled `cmake` needs `libssl.so.1.1` (replace `bin/cmake` with a pip-installed `cmake<4`; CMake 4 breaks old deps), chiaki-ng's `lib/protobuf` needs a host `protoc` at configure time, and `relocate-sdk.sh` needs the `file` command. Without `ares-package` on PATH the script packages the staged tree with `tools/make-ipk.sh` (same IPK layout; keeps file modes, so run it on Linux/WSL). App icons are rendered by `tools/make_icons.py` (Pillow) from the mark in `docs/branding/logo.svg`; the in-app logo is `ui_draw_logo()` in `ui.c`.
+
+A freshly installed app dir is root-owned 755 until the next reboot (webOS dev mode's boot script `chmod -R 777 /media/developer`), so `main.c` asks the Homebrew Channel to chmod it when it can't write `config.json`. Each install runs as its own uid, so `/tmp/chiaki.log` is made 0666.
 
 ## Versioning
 
@@ -36,7 +38,7 @@ The version lives only in `packaging/appinfo.json` (`version`). CMake embeds it 
 
 ## Debugging on the TV
 
-Logs go to `/tmp/chiaki.log` on the TV (truncated each launch): `ares-shell --device myTV -- "tail -f /tmp/chiaki.log"`. Runtime config lives at `/media/developer/apps/usr/palm/applications/org.homebrew.chiaki/config.json`.
+Logs go to `/tmp/chiaki.log` on the TV (truncated each launch): `ares-shell --device myTV -- "tail -f /tmp/chiaki.log"`. Runtime config lives at `/media/developer/apps/usr/palm/applications/dev.markgyoni.chiakiwebos/config.json`.
 
 Logging (`src/app_log.h`, implemented in `main.c`): `app_log()` is gated by `log_level`; `app_log_always()` is unconditional — use it for session lifecycle, wakeup, and errors so they're visible at the default `warning` level. Log lines are tagged (`[APP]`, `[AUTO]`, etc.).
 

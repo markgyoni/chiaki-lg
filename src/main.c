@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -42,7 +43,14 @@
 #include "stats.h"
 
 
-#define APP_DIR     "/media/developer/apps/usr/palm/applications/org.homebrew.chiaki"
+#ifndef APP_ID
+#define APP_ID      "dev.markgyoni.chiakiwebos"
+#endif
+#define APPS_ROOT   "/media/developer/apps/usr/palm/applications/"
+#define APP_DIR     APPS_ROOT APP_ID
+/* Before 0.9.0 the app was org.homebrew.chiaki (chiaki-lg); its config is
+ * copied over on the first start so linked consoles and accounts survive. */
+#define OLD_CONFIG_PATH APPS_ROOT "org.homebrew.chiaki/config.json"
 #define CONFIG_PATH APP_DIR "/config.json"
 #define LOG_PATH    "/tmp/chiaki.log"
 
@@ -233,16 +241,26 @@ static void sig_handler(int sig)
 
 static void do_wakeup(AppConfig *cfg, ChiakiLog *log)
 {
-    uint8_t account_id[8];
-    size_t decoded_len = sizeof(account_id);
-    if (chiaki_base64_decode(cfg->psn_account_id_b64,
-                             strlen(cfg->psn_account_id_b64),
-                             account_id, &decoded_len) != CHIAKI_ERR_SUCCESS)
+    // The wake-up credential is the registration key: its bytes are a hex
+    // string ("59130e93", NUL padded), read as a number (as chiaki-ng does).
+    // It used to be the PSN account ID, which consoles ignore (chiaki-lg #8).
+    char regist_key[17] = { 0 };
+    size_t decoded_len = sizeof(regist_key) - 1;
+    if (!cfg->registered_key_b64 ||
+        chiaki_base64_decode(cfg->registered_key_b64, strlen(cfg->registered_key_b64),
+                             (uint8_t *)regist_key, &decoded_len) != CHIAKI_ERR_SUCCESS)
     {
-        app_log_always("[WAKEUP] Failed to decode psn_account_id — check config\n");
+        app_log_always("[WAKEUP] Missing or invalid registration key — link the console again\n");
         return;
     }
-    uint64_t credential = *(uint64_t *)account_id;
+    regist_key[decoded_len < sizeof(regist_key) ? decoded_len : sizeof(regist_key) - 1] = '\0';
+    char *end = NULL;
+    uint64_t credential = (uint64_t)strtoull(regist_key, &end, 16);
+    if (!regist_key[0] || strlen(regist_key) > 8 || (end && *end))
+    {
+        app_log_always("[WAKEUP] Registration key \"%s\" is not a wake-up credential\n", regist_key);
+        return;
+    }
 
     // Send unicast to the PS5's IP address.
     app_log("[WAKEUP] Sending packet (unicast) to %s\n", cfg->host);
@@ -276,7 +294,7 @@ static void setup_ssl_ca_bundle(void)
         "/etc/pki/tls/certs/ca-bundle.crt",
         "/etc/ssl/cert.pem",
         "/usr/share/ca-certificates/ca-certificates.crt",
-        "/media/developer/apps/usr/palm/applications/org.homebrew.chiaki/cacert.pem",
+        APP_DIR "/cacert.pem",
         NULL
     };
     const char *existing = getenv("CURL_CA_BUNDLE");
@@ -1187,6 +1205,40 @@ static void wakeup_job(void *p)
         app_log_always("[WAKEUP] Deadline reached — attempting connection anyway\n");
 }
 
+// A fresh install leaves the app dir root-owned 755 until the next reboot
+// (webOS dev mode's boot script chmods /media/developer to 777), so the app
+// could not save config.json.  On a rooted TV ask the Homebrew Channel to open it up.
+static void ensure_app_dir_writable(void)
+{
+    if (access(APP_DIR, W_OK) == 0) return;
+    const char *ls = access("/usr/bin/luna-send-pub", X_OK) == 0 ? "/usr/bin/luna-send-pub" : "/usr/bin/luna-send";
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd),
+             "%s -n 1 -w 8000 luna://org.webosbrew.hbchannel.service/exec "
+             "'{\"command\":\"chmod 777 %s\"}' </dev/null >/dev/null 2>&1", ls, APP_DIR);
+    int rc = system(cmd);
+    app_log_always("[APP] app dir not writable; Homebrew Channel chmod %s\n",
+                   access(APP_DIR, W_OK) == 0 ? "fixed it" : "failed (settings are saved after the next TV restart)");
+    (void)rc;
+}
+
+// First start after the app ID change: take over the old app's config.
+static void migrate_old_config(const char *config_path)
+{
+    if (strcmp(config_path, CONFIG_PATH) != 0 || access(config_path, F_OK) == 0) return;
+    FILE *in = fopen(OLD_CONFIG_PATH, "rb");
+    if (!in) return;
+    FILE *out = fopen(config_path, "wb");
+    if (out) {
+        char buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof(buf), in)) > 0) fwrite(buf, 1, n, out);
+        fclose(out);
+        app_log_always("[APP] copied the settings of the old org.homebrew.chiaki app\n");
+    }
+    fclose(in);
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 int main(int argc, char *argv[])
@@ -1196,17 +1248,21 @@ int main(int argc, char *argv[])
     { struct rlimit rl = {0, 0}; setrlimit(RLIMIT_CORE, &rl); }
 
     /* ===== REQUIRED WEBOS SS4S ENV SETUP ===== */
-    chdir("/media/developer/apps/usr/palm/applications/org.homebrew.chiaki");
+    chdir(APP_DIR);
     setenv("SS4S_CONFIG_FILE", "./lib/ss4s_modules.ini", 1);
     // SS4S_MODULE is set after config load — auto-detection picks ndl-webos4 or ndl-webos5.
-    setenv("SS4S_APP_ID",      "org.homebrew.chiaki",    1);
+    setenv("SS4S_APP_ID",      APP_ID,    1);
     /* ========================================= */
 
     // Open log unconditionally first — once cfg is loaded we'll close it
     // if logging=false. This lets us capture any early startup errors.
+    // Each install runs as its own user: leave the log writable for the next
+    // one (a reinstall or the pre-0.9 app), else it falls back to the second name.
     g_log_file = fopen(LOG_PATH, "w");
     if (!g_log_file)
         g_log_file = fopen("/tmp/chiaki-debug.log", "w");
+    if (g_log_file)
+        fchmod(fileno(g_log_file), 0666);
 
     // Stamp each launch clearly so we can count restarts in the log.
     {
@@ -1226,6 +1282,8 @@ int main(int argc, char *argv[])
         config_path = argv[1];
 
     app_log("[APP] config_path = %s\n", config_path);
+    ensure_app_dir_writable();
+    migrate_old_config(config_path);
 
     signal(SIGINT,  sig_handler);
     signal(SIGTERM, sig_handler);

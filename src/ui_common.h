@@ -70,6 +70,8 @@ void set_color(SDL_Renderer *r, int R, int G, int B, int A);
 void fill_rect(SDL_Renderer *r, int x, int y, int w, int h);
 void hline(SDL_Renderer *r, int x, int y, int w);
 void fill_rounded_rect(SDL_Renderer *r, int x, int y, int w, int h, int radius);
+/* The app logo ("Couch Pad" mark) as a size x size tile. */
+void ui_draw_logo(SDL_Renderer *r, int x, int y, int size);
 void stroke_rounded_rect(SDL_Renderer *r, int x, int y, int w, int h, int radius);
 void draw_text(SDL_Renderer *r, int x, int y, const char *text, int scale);
 int  text_width(const char *text, int scale);

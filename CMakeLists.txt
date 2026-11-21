@@ -152,6 +152,8 @@ add_executable(chiaki-webos
 file(READ "${CMAKE_SOURCE_DIR}/packaging/appinfo.json" _appinfo)
 string(REGEX MATCH "\"version\"[ \t]*:[ \t]*\"([^\"]+)\"" _m "${_appinfo}")
 set(APP_VERSION "${CMAKE_MATCH_1}")
+string(REGEX MATCH "\"id\"[ \t]*:[ \t]*\"([^\"]+)\"" _m "${_appinfo}")
+set(APP_ID "${CMAKE_MATCH_1}")
 if(DEFINED ENV{CHIAKI_WEBOS_GIT} AND NOT "$ENV{CHIAKI_WEBOS_GIT}" STREQUAL "")
     set(APP_GIT "$ENV{CHIAKI_WEBOS_GIT}")
 elseif(DEFINED ENV{CHIAKI_LG_GIT} AND NOT "$ENV{CHIAKI_LG_GIT}" STREQUAL "")
@@ -165,9 +167,9 @@ else()
         set(APP_GIT "unknown")
     endif()
 endif()
-message(STATUS "Chiaki-webOS version ${APP_VERSION} (${APP_GIT})")
+message(STATUS "Chiaki-webOS ${APP_ID} version ${APP_VERSION} (${APP_GIT})")
 target_compile_definitions(chiaki-webos PRIVATE
-    APP_VERSION="${APP_VERSION}" APP_GIT="${APP_GIT}")
+    APP_VERSION="${APP_VERSION}" APP_GIT="${APP_GIT}" APP_ID="${APP_ID}")
 
 # Standalone controller diagnostics CLI (run over SSH on the TV; see tools/paddiag.c)
 add_executable(paddiag tools/paddiag.c src/pad_diag.c)
@@ -193,6 +195,17 @@ target_include_directories(chiaki-webos PRIVATE
     ${JSONC_INCLUDE_DIRS}
 )
 
+# webOS 4 firmware ships no libatomic.so.1, so link it statically (whole,
+# since static OpenSSL adds its own -latomic later on the line) and let
+# --as-needed drop that dynamic -latomic.
+find_library(LIBATOMIC_STATIC NAMES libatomic.a)
+if(LIBATOMIC_STATIC)
+    set(LIBATOMIC "-Wl,--whole-archive" "${LIBATOMIC_STATIC}" "-Wl,--no-whole-archive")
+    target_link_options(chiaki-webos PRIVATE "LINKER:--as-needed")
+else()
+    set(LIBATOMIC atomic)
+endif()
+
 target_link_libraries(chiaki-webos PRIVATE
     chiaki-lib
     ss4s
@@ -201,7 +214,7 @@ target_link_libraries(chiaki-webos PRIVATE
     OpenSSL::SSL
     OpenSSL::Crypto
     opus
-    m pthread dl atomic
+    m pthread dl ${LIBATOMIC}
 )
 
 # Enable optional NDL queries for stats overlay (buffer-latency estimate)
@@ -239,7 +252,6 @@ install(DIRECTORY "${CMAKE_BINARY_DIR}/lib/"
 
 # ── IPK packaging via ares-package ────────────────────────────────────────────
 set(IPK_STAGING_DIR "${CMAKE_BINARY_DIR}/ipk-staging")
-set(APP_ID "org.homebrew.chiaki")
 
 add_custom_target(ipk
     DEPENDS chiaki-webos paddiag btfix

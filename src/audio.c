@@ -4,6 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef APP_ID
+#define APP_ID "dev.markgyoni.chiakiwebos"
+#endif
+
 /* Forward declaration — defined in main.c, shared via app_log.h */
 extern void app_log(const char *fmt, ...);
 
@@ -43,7 +47,7 @@ static void audio_header_cb(ChiakiAudioHeader *header, void *user)
         .codec         = SS4S_AUDIO_OPUS,
         .numOfChannels = (int)header->channels,
         .sampleRate    = (int)header->rate,
-        .appName       = "org.homebrew.chiaki",
+        .appName       = APP_ID,
     };
 
     int rc = SS4S_PlayerAudioOpen(ctx->player, &info);
